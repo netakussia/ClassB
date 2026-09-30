@@ -13,7 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.ui import ADMIN_ROLES, menu_back_keyboard
+from bot.ui import ADMIN_ROLES, add_cancel_button, menu_back_keyboard
 from config_loader import AppConfig
 from database.models import ClassEvent
 
@@ -49,6 +49,7 @@ def _category_keyboard() -> InlineKeyboardMarkup:
             text=title,
             callback_data=EventCategoryCallback(category=category).pack(),
         )
+    add_cancel_button(keyboard)
     keyboard.adjust(1)
     return keyboard.as_markup()
 
@@ -114,8 +115,7 @@ async def events_handler(
     await message.answer(_format_event_list(upcoming, today), reply_markup=menu_back_keyboard())
 
 
-@router.message(Command("event_add"))
-async def event_add_start_handler(
+async def start_event_add(
     message: Message,
     state: FSMContext,
     role: str,
@@ -126,6 +126,11 @@ async def event_add_start_handler(
     await state.clear()
     await state.set_state(EventForm.category)
     await message.answer("Выбери категорию события:", reply_markup=_category_keyboard())
+
+
+@router.message(Command("event_add"))
+async def event_add_start_handler(message: Message, state: FSMContext, role: str) -> None:
+    await start_event_add(message, state, role)
 
 
 @router.callback_query(EventForm.category, EventCategoryCallback.filter())
@@ -146,7 +151,7 @@ async def event_category_handler(
     await state.set_state(EventForm.title)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Введи название события:")
+        await callback.message.answer("Введи название события:", reply_markup=_cancel_keyboard())
 
 
 @router.message(EventForm.title, F.text)
@@ -167,8 +172,25 @@ async def event_title_handler(
     await state.set_state(EventForm.event_date)
     await message.answer(
         "Введи дату события в формате ДД.ММ.ГГГГ "
-        "(например, 15.10.2026):"
+        "(например, 15.10.2026):",
+        reply_markup=_cancel_keyboard(),
     )
+
+
+@router.message(EventForm.category)
+async def event_category_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, выбери категорию события кнопкой.")
+
+
+@router.message(EventForm.title)
+async def event_title_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь название события текстом.")
+
+
+def _cancel_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    add_cancel_button(keyboard)
+    return keyboard.as_markup()
 
 
 @router.message(EventForm.event_date, F.text)
@@ -213,3 +235,8 @@ async def event_date_handler(
         f"Событие «{event.title}» добавлено на {event.event_date:%d.%m.%Y}.",
         reply_markup=menu_back_keyboard(),
     )
+
+
+@router.message(EventForm.event_date)
+async def event_date_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь дату текстом в формате ДД.ММ.ГГГГ.")

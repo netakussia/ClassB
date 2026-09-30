@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.reply import main_reply_keyboard
-from bot.ui import ADMIN_ROLES, menu_back_keyboard
+from bot.ui import ADMIN_ROLES, add_cancel_button, menu_back_keyboard
 from database.models import ClassDocument
 
 
@@ -66,6 +66,15 @@ def _categories_keyboard(action: str) -> InlineKeyboardMarkup:
             text=label,
             callback_data=DocumentCallback(action=action, value=category).pack(),
         )
+    keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+def _add_categories_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    for category, label in CATEGORIES.items():
+        keyboard.button(text=label, callback_data=DocumentCallback(action="add", value=category).pack())
+    add_cancel_button(keyboard)
     keyboard.adjust(1)
     return keyboard.as_markup()
 
@@ -156,8 +165,7 @@ async def download_document_handler(
         )
 
 
-@router.message(Command("docs_add"))
-async def document_add_start_handler(
+async def start_document_add(
     message: Message,
     state: FSMContext,
     role: str,
@@ -169,8 +177,13 @@ async def document_add_start_handler(
     await state.set_state(DocumentForm.category)
     await message.answer(
         "Выбери категорию документа:",
-        reply_markup=_categories_keyboard("add"),
+        reply_markup=_add_categories_keyboard(),
     )
+
+
+@router.message(Command("docs_add"))
+async def document_add_start_handler(message: Message, state: FSMContext, role: str) -> None:
+    await start_document_add(message, state, role)
 
 
 @router.callback_query(
@@ -194,7 +207,9 @@ async def document_category_handler(
     await state.set_state(DocumentForm.title)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Введи название документа:")
+        keyboard = InlineKeyboardBuilder()
+        add_cancel_button(keyboard)
+        await callback.message.answer("Введи название документа:", reply_markup=keyboard.as_markup())
 
 
 @router.message(DocumentForm.title, F.text)
@@ -214,8 +229,25 @@ async def document_title_handler(
     await state.update_data(title=title)
     await state.set_state(DocumentForm.content)
     await message.answer(
-        "Отправь файл документом или пришли текстовую ссылку (http...):"
+        "Отправь файл документом или пришли текстовую ссылку (http...):",
+        reply_markup=_cancel_keyboard(),
     )
+
+
+@router.message(DocumentForm.category)
+async def document_category_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, выбери категорию кнопкой.")
+
+
+@router.message(DocumentForm.title)
+async def document_title_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь название документа текстом.")
+
+
+def _cancel_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    add_cancel_button(keyboard)
+    return keyboard.as_markup()
 
 
 @router.message(DocumentForm.content)

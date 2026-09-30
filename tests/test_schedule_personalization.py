@@ -61,6 +61,13 @@ class SchedulePersonalizationTests(unittest.TestCase):
         with patch.dict("os.environ", {"BOT_TOKEN": "test-token"}):
             self.assertEqual(load_config().bot.token, "test-token")
 
+    def test_students_roster_is_loaded_with_authoritative_profile_fields(self) -> None:
+        students = load_config().students
+
+        self.assertEqual(students[0].telegram_id, 123456789)
+        self.assertEqual(students[0].full_name, "Иванов Иван")
+        self.assertEqual(students[0].subgroup, "english")
+
     def test_migrate_users_adds_nullable_subgroup_to_existing_table(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".sqlite") as database_file:
             engine = create_engine(f"sqlite:///{database_file.name}")

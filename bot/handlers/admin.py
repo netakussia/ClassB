@@ -13,10 +13,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.ui import MenuCallback, menu_back_keyboard
+from bot.ui import MenuCallback, add_cancel_button, menu_back_keyboard
 from bot.utils.homework_dates import local_today, next_lesson_date, subjects_for_date
 from bot.utils.subjects import all_subjects, upcoming_subjects
-from config_loader import AppConfig
+from config_loader import AppConfig, StudentConfig, append_student
 from database.models import Homework, HomeworkHistory
 
 
@@ -32,6 +32,12 @@ class HomeworkForm(StatesGroup):
     attachments = State()
     deadline = State()
     overwrite_confirmation = State()
+
+
+class StudentAddForm(StatesGroup):
+    telegram_id = State()
+    full_name = State()
+    subgroup = State()
 
 
 class HomeworkOverwriteCallback(CallbackData, prefix="hw_overwrite"):
@@ -55,6 +61,10 @@ class HomeworkAttachmentCallback(CallbackData, prefix="hw_add_attachment"):
     action: str
 
 
+class StudentSubgroupCallback(CallbackData, prefix="student_add_subgroup"):
+    subgroup: str
+
+
 def _subject_keyboard(subjects: list[str]) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     for index, subject in enumerate(subjects):
@@ -76,6 +86,7 @@ def _subject_keyboard(subjects: list[str]) -> InlineKeyboardMarkup:
         text="🏠 В меню",
         callback_data=MenuCallback(action="home").pack(),
     )
+    add_cancel_button(keyboard)
     keyboard.adjust(1)
     return keyboard.as_markup()
 
@@ -85,6 +96,7 @@ def _attachment_keyboard() -> InlineKeyboardMarkup:
     keyboard.button(text="➕ Добавить ещё файл", callback_data=HomeworkAttachmentCallback(action="more").pack())
     keyboard.button(text="✅ Готово", callback_data=HomeworkAttachmentCallback(action="done").pack())
     keyboard.button(text="🏠 В меню", callback_data=MenuCallback(action="home").pack())
+    add_cancel_button(keyboard)
     keyboard.adjust(1)
     return keyboard.as_markup()
 
@@ -103,8 +115,145 @@ def _deadline_keyboard() -> InlineKeyboardMarkup:
         text="🏠 В меню",
         callback_data=MenuCallback(action="home").pack(),
     )
+    add_cancel_button(keyboard)
     keyboard.adjust(2, 1)
     return keyboard.as_markup()
+
+
+def _student_subgroup_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(
+        text="🇬🇧 Английская",
+        callback_data=StudentSubgroupCallback(subgroup="english").pack(),
+    )
+    keyboard.button(
+        text="🇫🇷 Французская",
+        callback_data=StudentSubgroupCallback(subgroup="french").pack(),
+    )
+    add_cancel_button(keyboard)
+    keyboard.adjust(2, 1)
+    return keyboard.as_markup()
+
+
+async def start_student_add(
+    message: Message,
+    state: FSMContext,
+    role: str,
+) -> None:
+    if role not in ADMIN_ROLES:
+        await message.answer("Эта штука только для админов.")
+        return
+    await state.clear()
+    await state.set_state(StudentAddForm.telegram_id)
+    await message.answer(
+        "Введи Telegram ID студента (ученик может узнать его через @getmyid_bot):",
+        reply_markup=menu_back_keyboard(),
+    )
+
+
+@router.message(StudentAddForm.telegram_id, F.text)
+async def student_add_id_handler(message: Message, state: FSMContext, role: str) -> None:
+    if role not in ADMIN_ROLES:
+        await state.clear()
+        await message.answer("Эта штука только для админов.")
+        return
+    try:
+        telegram_id = int((message.text or "").strip())
+    except ValueError:
+        telegram_id = 0
+    if telegram_id <= 0:
+        await message.answer("Telegram ID должен быть положительным числом.")
+        return
+    await state.update_data(telegram_id=telegram_id)
+    await state.set_state(StudentAddForm.full_name)
+    await message.answer(
+        "Введи Фамилию и Имя студента:",
+        reply_markup=menu_back_keyboard(),
+    )
+
+
+@router.message(StudentAddForm.telegram_id)
+async def student_add_id_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь Telegram ID числом.")
+
+
+@router.message(StudentAddForm.full_name, F.text)
+async def student_add_name_handler(message: Message, state: FSMContext, role: str) -> None:
+    if role not in ADMIN_ROLES:
+        await state.clear()
+        await message.answer("Эта штука только для админов.")
+        return
+    full_name = (message.text or "").strip()
+    if not full_name:
+        await message.answer("Фамилия и имя не должны быть пустыми.")
+        return
+    await state.update_data(full_name=full_name)
+    await state.set_state(StudentAddForm.subgroup)
+    await message.answer("Выбери подгруппу:", reply_markup=_student_subgroup_keyboard())
+
+
+@router.message(StudentAddForm.full_name)
+async def student_add_name_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь Фамилию и Имя текстом.")
+
+
+@router.callback_query(StudentAddForm.subgroup, StudentSubgroupCallback.filter())
+async def student_add_subgroup_handler(
+    callback: CallbackQuery,
+    callback_data: StudentSubgroupCallback,
+    state: FSMContext,
+    role: str,
+    config: AppConfig,
+) -> None:
+    if role not in ADMIN_ROLES:
+        await state.clear()
+        await callback.answer("Эта кнопка только для админов.", show_alert=True)
+        return
+    form_data = await state.get_data()
+    telegram_id = form_data.get("telegram_id")
+    full_name = form_data.get("full_name")
+    if (
+        not isinstance(telegram_id, int)
+        or not isinstance(full_name, str)
+        or callback_data.subgroup not in {"english", "french"}
+    ):
+        await state.clear()
+        await callback.answer("Данные студента потерялись. Начни ещё раз.", show_alert=True)
+        return
+    if any(student.telegram_id == telegram_id for student in config.students):
+        await state.clear()
+        await callback.answer("Этот Telegram ID уже есть в списке.", show_alert=True)
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "Студент с таким Telegram ID уже добавлен.",
+                reply_markup=menu_back_keyboard(),
+            )
+        return
+
+    student = StudentConfig(
+        telegram_id=telegram_id,
+        full_name=full_name,
+        subgroup=callback_data.subgroup,
+    )
+    try:
+        append_student(config, student)
+    except (OSError, ValueError) as exc:
+        await state.clear()
+        await callback.answer("Не удалось сохранить список студентов.", show_alert=True)
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "Не удалось сохранить students.yaml. Проверь права доступа к файлу.",
+                reply_markup=menu_back_keyboard(),
+            )
+        return
+
+    await state.clear()
+    await callback.answer("Студент добавлен.")
+    if callback.message is not None:
+        await callback.message.edit_text(
+            f"✅ Студент {student.full_name} успешно добавлен и получил доступ к боту!",
+            reply_markup=menu_back_keyboard(),
+        )
 
 
 async def start_homework_add(
@@ -195,7 +344,10 @@ async def homework_subject_choice_handler(
     if callback_data.action == "new":
         await callback.answer()
         await state.set_state(HomeworkForm.new_subject_confirmation)
-        await callback.message.edit_text("Введи название нового предмета. Он будет добавлен вне расписания только после подтверждения.")
+        await callback.message.edit_text(
+            "Введи название нового предмета. Он будет добавлен вне расписания только после подтверждения.",
+            reply_markup=menu_back_keyboard(),
+        )
         return
     if callback_data.action == "cancel_new":
         await state.clear()
@@ -254,6 +406,7 @@ async def homework_subject_choice_handler(
             callback_data=HomeworkTargetCallback(choice="today").pack(),
         )
         keyboard.button(text="🏠 В меню", callback_data=MenuCallback(action="home").pack())
+        add_cancel_button(keyboard)
         keyboard.adjust(1)
         await callback.answer()
         await callback.message.edit_text(
@@ -319,6 +472,7 @@ async def homework_new_subject_handler(message: Message, state: FSMContext) -> N
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="✅ Да, добавить", callback_data=HomeworkSubjectCallback(action="confirm_new", subject_index=0).pack())
     keyboard.button(text="✋ Отмена", callback_data=HomeworkSubjectCallback(action="cancel_new", subject_index=0).pack())
+    add_cancel_button(keyboard)
     keyboard.adjust(2)
     await message.answer(f"Такого предмета нет в расписании, точно добавить «{subject}» как новый?", reply_markup=keyboard.as_markup())
 
@@ -450,6 +604,7 @@ async def _save_homework_from_form(
             text="✋ Нет, отменить",
             callback_data=HomeworkOverwriteCallback(action="no").pack(),
         )
+        add_cancel_button(keyboard)
         keyboard.adjust(2)
         await respond(
             f"ДЗ по «{subject}» уже есть. Заменить его? "
@@ -535,6 +690,11 @@ async def homework_deadline_handler(
         deadline_date=deadline_date,
         updated_by=message.from_user.id if message.from_user is not None else None,
     )
+
+
+@router.message(HomeworkForm.deadline)
+async def homework_deadline_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь дату текстом в формате ДД.ММ.ГГГГ.")
 
 
 @router.callback_query(

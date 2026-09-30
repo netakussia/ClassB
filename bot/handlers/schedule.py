@@ -35,24 +35,6 @@ class ScheduleActionCallback(CallbackData, prefix="schedule"):
     action: str
 
 
-class SubgroupCallback(CallbackData, prefix="subgroup"):
-    subgroup: str
-
-
-def _subgroup_keyboard() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(
-        text="🇬🇧 Английская подгруппа",
-        callback_data=SubgroupCallback(subgroup="english").pack(),
-    )
-    keyboard.button(
-        text="🇫🇷 Французская подгруппа",
-        callback_data=SubgroupCallback(subgroup="french").pack(),
-    )
-    keyboard.adjust(1)
-    return keyboard.as_markup()
-
-
 async def _get_or_create_user(
     session: AsyncSession,
     telegram_user: TelegramUser,
@@ -79,10 +61,12 @@ async def show_my_group(
         return
     user = await _get_or_create_user(session, telegram_user)
     await session.commit()
-    group = SUBGROUP_NAMES.get(user.subgroup, "не выбрана")
+    group = SUBGROUP_NAMES.get(user.subgroup, "не указана")
+    icon = "🇬🇧" if user.subgroup == "english" else "🇫🇷" if user.subgroup == "french" else "👥"
+    name = user.full_name or telegram_user.full_name
     await message.answer(
-        f"Текущая подгруппа: {group}.\nВыберите свою подгруппу:",
-        reply_markup=_subgroup_keyboard(),
+        f"Студент: {name} | Подгруппа: {icon} {group} (из базы группы)",
+        reply_markup=menu_back_keyboard(),
     )
 
 
@@ -274,25 +258,6 @@ async def schedule_handler(
 @router.message(Command("my_group"))
 async def my_group_handler(message: Message, session: AsyncSession) -> None:
     await show_my_group(message, session)
-
-
-@router.callback_query(SubgroupCallback.filter())
-async def subgroup_callback_handler(
-    callback: CallbackQuery,
-    callback_data: SubgroupCallback,
-    session: AsyncSession,
-) -> None:
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await _get_or_create_user(session, callback.from_user)
-    user.subgroup = callback_data.subgroup
-    await session.commit()
-    await callback.answer("Подгруппа сохранена.")
-    await callback.message.edit_text(
-        f"Текущая подгруппа: {SUBGROUP_NAMES[callback_data.subgroup]}.",
-        reply_markup=menu_back_keyboard(),
-    )
 
 
 @router.callback_query(ScheduleActionCallback.filter())

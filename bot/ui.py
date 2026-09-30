@@ -14,6 +14,15 @@ class MenuCallback(CallbackData, prefix="menu"):
     action: str
 
 
+class CancelCallback(CallbackData, prefix="cancel"):
+    action: str = "form"
+
+
+def add_cancel_button(keyboard: InlineKeyboardBuilder) -> None:
+    """Append the same cancellation action to an in-progress form."""
+    keyboard.button(text="❌ Отменить", callback_data=CancelCallback().pack())
+
+
 def main_menu_keyboard(role: str) -> InlineKeyboardMarkup:
     """Build the compact navigation panel appropriate for the user's role."""
     keyboard = InlineKeyboardBuilder()
@@ -60,32 +69,46 @@ def main_menu_keyboard(role: str) -> InlineKeyboardMarkup:
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="➕ Добавить ДЗ",
+        text="📝 Добавить ДЗ",
         callback_data=MenuCallback(action="add_homework").pack(),
     )
     keyboard.button(
-        text="🔁 Добавить замену",
+        text="🔄 Замена уроков",
         callback_data=MenuCallback(action="replace").pack(),
     )
     keyboard.button(
-        text="📋 Заявки класса",
+        text="📂 Загрузить файл",
+        callback_data=MenuCallback(action="add_document").pack(),
+    )
+    keyboard.button(
+        text="📅 Новое событие",
+        callback_data=MenuCallback(action="add_event").pack(),
+    )
+    keyboard.button(
+        text="👥 Добавить студента",
+        callback_data=MenuCallback(action="add_student").pack(),
+    )
+    keyboard.button(
+        text="📋 Рапортичка отсутствий",
         callback_data=MenuCallback(action="class_absences").pack(),
     )
     keyboard.button(
-        text="🔓 Снять ограничения",
+        text="🔓 Снять бан",
         callback_data=MenuCallback(action="restrictions").pack(),
     )
     keyboard.button(
         text="🏠 Обычное меню",
         callback_data=MenuCallback(action="home").pack(),
     )
-    keyboard.adjust(2, 2, 1)
+    keyboard.adjust(2, 2, 1, 2, 1)
     return keyboard.as_markup()
 
 
 def menu_back_keyboard(text: str = "🏠 В меню") -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text=text, callback_data=MenuCallback(action="home").pack())
+    add_cancel_button(keyboard)
+    keyboard.adjust(2)
     return keyboard.as_markup()
 
 

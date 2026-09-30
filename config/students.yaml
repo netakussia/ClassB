@@ -1,0 +1,7 @@
+students:
+  - telegram_id: 123456789
+    full_name: "Иванов Иван"
+    subgroup: "english" # english / french
+  - telegram_id: 987654321
+    full_name: "Петров Пётр"
+    subgroup: "french"

@@ -6,4 +6,7 @@ services:
       - .env
     volumes:
       - ./config:/app/config:ro
+      # Only the roster is writable: admins add students from the bot UI.
+      - ./config/students.yaml:/app/config/students.yaml
       - ./data:/app/data
+      - ./logs:/app/logs

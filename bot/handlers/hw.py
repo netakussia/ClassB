@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import html
 from collections.abc import Iterable
 from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.filters.command import CommandObject
@@ -39,16 +41,17 @@ async def _answer_long_text(
     message: Message,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: ParseMode | None = None,
 ) -> None:
     """Send text in Telegram-safe chunks without losing newlines."""
     while len(text) > TELEGRAM_TEXT_LIMIT:
         split_at = text.rfind("\n", 0, TELEGRAM_TEXT_LIMIT)
         if split_at <= 0:
             split_at = TELEGRAM_TEXT_LIMIT
-        await message.answer(text[:split_at])
+        await message.answer(text[:split_at], parse_mode=parse_mode)
         text = text[split_at:].lstrip("\n")
     if text:
-        await message.answer(text, reply_markup=reply_markup)
+        await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
 def _attachments_for(homework: Homework) -> Iterable[dict[str, Any]]:
@@ -74,14 +77,19 @@ async def _send_homework_record(
     heading: str,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
-    lines = [f"{heading} · {homework.subject}"]
+    lines = [f"{html.escape(heading)} · <b>{html.escape(homework.subject)}</b>"]
     if homework.is_deadline and homework.deadline_date is not None:
         lines.append(f"Дедлайн: {homework.deadline_date:%d.%m.%Y}")
     if homework.text:
-        lines.append(homework.text)
+        lines.append(f"<blockquote>{html.escape(homework.text)}</blockquote>")
     elif not homework.attachments:
         lines.append("Текст и вложения не указаны.")
-    await _answer_long_text(message, "\n".join(lines), reply_markup=reply_markup)
+    await _answer_long_text(
+        message,
+        "\n".join(lines),
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML,
+    )
     await _send_homework_attachments(message, homework)
 
 

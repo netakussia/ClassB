@@ -15,7 +15,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.ui import MenuCallback, menu_back_keyboard
+from bot.ui import MenuCallback, add_cancel_button, menu_back_keyboard
 from bot.utils.schedule_parser import WEEKDAYS, parse_schedule
 from bot.utils.subjects import all_subjects
 from config_loader import AppConfig, Lesson
@@ -79,6 +79,7 @@ def _date_keyboard() -> InlineKeyboardMarkup:
         text="🏠 В меню",
         callback_data=MenuCallback(action="home").pack(),
     )
+    add_cancel_button(keyboard)
     keyboard.adjust(2, 1, 1)
     return keyboard.as_markup()
 
@@ -89,6 +90,7 @@ def _subject_keyboard(config: AppConfig) -> InlineKeyboardMarkup:
         keyboard.button(text=subject, callback_data=ReplaceSubjectCallback(action="select", subject_index=index).pack())
     keyboard.button(text="➕ Добавить новый предмет в список", callback_data=ReplaceSubjectCallback(action="new", subject_index=0).pack())
     keyboard.button(text="🏠 В меню", callback_data=MenuCallback(action="home").pack())
+    add_cancel_button(keyboard)
     keyboard.adjust(1)
     return keyboard.as_markup()
 
@@ -147,6 +149,7 @@ async def _ask_for_lesson(
         text="🏠 В меню",
         callback_data=MenuCallback(action="home").pack(),
     )
+    add_cancel_button(keyboard)
     keyboard.adjust(1)
     prompt = f"Выбери урок для замены на {target_date:%d.%m.%Y}:"
     if replace_message:
@@ -242,6 +245,12 @@ async def replace_date_handler(
     await _select_replacement_date(message, state, target_date, config)
 
 
+@router.message(ReplaceForm.target_date)
+@admin_required
+async def replace_date_fallback_handler(message: Message, role: str) -> None:
+    await message.answer("Пожалуйста, отправь дату текстом в формате ДД.ММ.")
+
+
 @router.callback_query(ReplaceForm.lesson_number, F.data.startswith("replace:lesson:"))
 @admin_required
 async def replace_lesson_handler(
@@ -271,6 +280,7 @@ async def replace_lesson_handler(
         text="🏠 В меню",
         callback_data=MenuCallback(action="home").pack(),
     )
+    add_cancel_button(keyboard)
     keyboard.adjust(2, 1)
     await callback.answer()
     if callback.message is not None:
@@ -307,7 +317,10 @@ async def replace_subject_handler(callback: CallbackQuery, callback_data: Replac
     if callback_data.action == "new":
         await state.set_state(ReplaceForm.new_subject_confirmation)
         await callback.answer()
-        await callback.message.edit_text("Введи название нового предмета. Он будет добавлен только после подтверждения.")
+        await callback.message.edit_text(
+            "Введи название нового предмета. Он будет добавлен только после подтверждения.",
+            reply_markup=menu_back_keyboard(),
+        )
         return
     subjects = all_subjects(config)
     if callback_data.action != "select" or callback_data.subject_index not in range(len(subjects)):
@@ -330,6 +343,7 @@ async def replace_new_subject_name_handler(message: Message, state: FSMContext, 
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="✅ Да, добавить", callback_data=ReplaceSubjectCallback(action="confirm_new", subject_index=0).pack())
     keyboard.button(text="✋ Отмена", callback_data=ReplaceSubjectCallback(action="cancel_new", subject_index=0).pack())
+    add_cancel_button(keyboard)
     keyboard.adjust(2)
     await message.answer(f"Такого предмета нет в расписании, точно добавить «{subject}» как новый?", reply_markup=keyboard.as_markup())
 

@@ -71,10 +71,16 @@ def _profile_values(telegram_user: TelegramUser | None) -> tuple[str | None, str
     return full_name, username
 
 
+SUBGROUP_NAMES = {"english": "Английская", "french": "Французская"}
+
+
 def _user_label(user: User) -> str:
-    full_name = user.full_name or "Пользователь"
-    username = f" (@{user.username})" if user.username else ""
-    return f"{full_name}{username} · ID {user.telegram_id}"
+    return user.full_name or "Пользователь"
+
+
+def _student_label(user: User) -> str:
+    subgroup = SUBGROUP_NAMES.get(user.subgroup)
+    return f"{_user_label(user)} ({subgroup} подгруппа)" if subgroup else _user_label(user)
 
 
 async def _get_or_create_user(
@@ -92,10 +98,7 @@ async def _get_or_create_user(
         )
         session.add(user)
         await session.commit()
-    elif telegram_user is not None and (
-        user.full_name != full_name or user.username != username
-    ):
-        user.full_name = full_name
+    elif telegram_user is not None and user.username != username:
         user.username = username
         await session.commit()
     return user
@@ -160,7 +163,7 @@ def _lessons_label(lessons: object) -> str:
     numbers = sorted(
         int(item) for item in lessons if isinstance(item, int) or str(item).isdigit()
     )
-    return ", ".join(f"урок №{number}" for number in numbers) or "уроки не указаны"
+    return ", ".join(str(number) for number in numbers) + " пара" if numbers else "уроки не указаны"
 
 
 def _lessons_overlap(existing: object, requested: list[int] | list[str]) -> bool:
@@ -286,8 +289,8 @@ async def _save_absence(
 
     if target_date == today:
         notification = (
-            "⚠️ Заявка на отсутствие сегодня\n"
-            f"Пользователь: {_user_label(user)}\n"
+            "⚠️ Заявка на отсутствие (Сегодня)\n"
+            f"Студент: {_student_label(user)}\n"
             f"Уроки: {_lessons_label(lessons)}"
         )
         for admin_id in _admin_ids(config):
@@ -401,6 +404,11 @@ async def absent_custom_date_handler(
         await message.answer("Можно выбрать дату от сегодня и не более чем на 14 дней вперёд.")
         return
     await _show_lesson_selection(message, state, target_date, config)
+
+
+@router.message(AbsentForm.date_input)
+async def absent_date_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь дату текстом в формате ДД.ММ.")
 
 
 @router.callback_query(
@@ -613,16 +621,18 @@ async def show_class_absences(
             )
         )
     }
-    lines = ["📋 АКТИВНЫЕ ЗАЯВКИ"]
+    lines: list[str] = []
     current_date: date | None = None
     keyboard = InlineKeyboardBuilder()
     for absence in absences:
         if absence.target_date != current_date:
             current_date = absence.target_date
-            lines.append(f"\n📅 {current_date:%d.%m.%Y}")
+            if lines:
+                lines.append("")
+            lines.append(f"📋 Отсутствия на {current_date:%d.%m.%Y}:")
         user = users.get(absence.telegram_id)
-        label = _user_label(user) if user is not None else f"Пользователь · ID {absence.telegram_id}"
-        lines.append(f"• {label}\n  {_lessons_label(absence.lessons)} · заявка #{absence.id}")
+        label = _user_label(user) if user is not None else "Студент не найден"
+        lines.append(f"• {label} — {_lessons_label(absence.lessons)}")
         keyboard.button(
             text=f"Отметить как ложную #{absence.id}",
             callback_data=RecordActionCallback(action="flag", absence_id=absence.id).pack(),

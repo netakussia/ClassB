@@ -1,11 +1,16 @@
+import html
+
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.handlers.admin import start_homework_add
+from bot.handlers.admin import start_homework_add, start_student_add
+from bot.handlers.docs import start_document_add
+from bot.handlers.events import start_event_add
 from bot.handlers.absent import (
     show_absence_restrictions,
     show_class_absences,
@@ -18,6 +23,7 @@ from bot.handlers.replacements import start_replacement_form
 from bot.handlers.schedule import show_my_group, show_next_schedule
 from bot.ui import (
     ADMIN_ROLES,
+    CancelCallback,
     MenuCallback,
     admin_menu_keyboard,
     main_menu_keyboard,
@@ -25,6 +31,7 @@ from bot.ui import (
     remove_inline_screen,
 )
 from config_loader import AppConfig
+from database.models import User
 
 
 router = Router(name="base")
@@ -76,18 +83,53 @@ def _help_keyboard() -> InlineKeyboardMarkup:
     return keyboard.as_markup()
 
 
-async def show_main_menu(message: Message, role: str) -> None:
+async def show_main_menu(
+    message: Message,
+    role: str,
+    user: User | None = None,
+    display_name: str | None = None,
+) -> None:
+    full_name = user.full_name if user and user.full_name else display_name or "студент"
+    subgroup_names = {"english": "🇬🇧 Английская", "french": "🇫🇷 Французская"}
+    subgroup = subgroup_names.get(user.subgroup if user else None, "не указана")
     await message.answer(
-        _main_menu_text(role),
+        "👋 Привет, <b>" + html.escape(full_name) + "</b>!\n"
+        "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
+        f"Твоя подгруппа: <i>{html.escape(subgroup)}</i>.\n\n"
+        "Выбери нужное действие в меню ниже 👇"
+        + ("\n\n🛠 Доступна админ-панель." if role in ADMIN_ROLES else ""),
         reply_markup=main_menu_keyboard(role),
+        parse_mode=ParseMode.HTML,
     )
     await message.answer("Меню разделов доступно на клавиатуре ниже.", reply_markup=main_reply_keyboard())
 
 
 @router.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext, role: str) -> None:
+async def start_handler(message: Message, state: FSMContext, role: str, session: AsyncSession) -> None:
     await state.clear()
-    await show_main_menu(message, role)
+    user = await session.get(User, message.from_user.id) if message.from_user else None
+    await show_main_menu(message, role, user, message.from_user.full_name if message.from_user else None)
+
+
+@router.message(Command("admin"))
+async def admin_hub_handler(message: Message, role: str) -> None:
+    if role not in ADMIN_ROLES:
+        await message.answer("Эта панель только для администраторов.")
+        return
+    await message.answer("🛠 <b>АДМИН-ХАБ</b>\nВыбери действие.", reply_markup=admin_menu_keyboard(), parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(CancelCallback.filter())
+async def cancel_form_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer("Действие отменено.")
+    if callback.message is None:
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer("Действие отменено.", reply_markup=menu_back_keyboard())
 
 
 @router.message(Command("whoami"))
@@ -181,9 +223,17 @@ async def menu_callback_handler(
     if action == "home":
         await state.clear()
         await callback.answer()
+        user = await session.get(User, callback.from_user.id)
+        full_name = user.full_name if user and user.full_name else callback.from_user.full_name
+        subgroup_names = {"english": "🇬🇧 Английская", "french": "🇫🇷 Французская"}
+        subgroup = subgroup_names.get(user.subgroup if user else None, "не указана")
         await callback.message.edit_text(
-            _main_menu_text(role),
+            "👋 Привет, <b>" + html.escape(full_name) + "</b>!\n"
+            "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
+            f"Твоя подгруппа: <i>{html.escape(subgroup)}</i>.\n\n"
+            "Выбери нужное действие в меню ниже 👇",
             reply_markup=main_menu_keyboard(role),
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -219,7 +269,7 @@ async def menu_callback_handler(
         )
         return
 
-    if action in {"add_homework", "replace", "class_absences", "restrictions"} and role not in ADMIN_ROLES:
+    if action in {"add_homework", "replace", "add_document", "add_event", "add_student", "class_absences", "restrictions"} and role not in ADMIN_ROLES:
         await callback.answer("Эта кнопка только для админов.", show_alert=True)
         return
 
@@ -256,6 +306,12 @@ async def menu_callback_handler(
         await start_homework_add(callback.message, state, role, config)
     elif action == "replace":
         await start_replacement_form(callback.message, state, role)
+    elif action == "add_document":
+        await start_document_add(callback.message, state, role)
+    elif action == "add_event":
+        await start_event_add(callback.message, state, role)
+    elif action == "add_student":
+        await start_student_add(callback.message, state, role)
     elif action == "class_absences":
         await show_class_absences(callback.message, role, session, config)
     elif action == "restrictions":

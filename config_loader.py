@@ -28,6 +28,13 @@ class RolesConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class StudentConfig:
+    telegram_id: int
+    full_name: str
+    subgroup: str
+
+
+@dataclass(frozen=True, slots=True)
 class SanctionsConfig:
     ban_threshold: int
     ban_days: int
@@ -89,6 +96,8 @@ class ScheduleConfig:
 class AppConfig:
     bot: BotConfig
     roles: RolesConfig
+    students: list[StudentConfig]
+    students_path: Path
     sanctions: SanctionsConfig
     schedule: ScheduleConfig
 
@@ -124,6 +133,65 @@ def _int_list(data: dict[str, Any], key: str, path: Path) -> list[int]:
     if any(type(item) is not int for item in value):
         raise ValueError(f"Expected every item in '{key}' in {path} to be an integer")
     return value
+
+
+def _students_config(data: dict[str, Any], path: Path) -> list[StudentConfig]:
+    raw_students = _required(data, "students", list, path)
+    students: list[StudentConfig] = []
+    seen_ids: set[int] = set()
+    for index, raw_student in enumerate(raw_students, start=1):
+        context = f"students[{index}]"
+        if not isinstance(raw_student, dict):
+            raise ValueError(f"Expected a mapping for '{context}' in {path}")
+        telegram_id = raw_student.get("telegram_id")
+        full_name = raw_student.get("full_name")
+        subgroup = raw_student.get("subgroup")
+        if type(telegram_id) is not int or telegram_id <= 0:
+            raise ValueError(f"Expected a positive integer telegram_id for '{context}' in {path}")
+        if not isinstance(full_name, str) or not full_name.strip():
+            raise ValueError(f"Expected a non-empty full_name for '{context}' in {path}")
+        if subgroup not in {"english", "french"}:
+            raise ValueError(f"Expected subgroup 'english' or 'french' for '{context}' in {path}")
+        if telegram_id in seen_ids:
+            raise ValueError(f"Duplicate telegram_id {telegram_id} in {path}")
+        seen_ids.add(telegram_id)
+        students.append(
+            StudentConfig(
+                telegram_id=telegram_id,
+                full_name=full_name.strip(),
+                subgroup=subgroup,
+            )
+        )
+    return students
+
+
+def append_student(config: AppConfig, student: StudentConfig) -> None:
+    """Persist a roster entry and update the live whitelist after a safe write."""
+    path = config.students_path
+    data = _load_yaml(path)
+    students = _students_config(data, path)
+    if any(item.telegram_id == student.telegram_id for item in students):
+        raise ValueError(f"Student with Telegram ID {student.telegram_id} already exists")
+
+    raw_students = data.setdefault("students", [])
+    if not isinstance(raw_students, list):  # Defensive; _students_config already validates this.
+        raise ValueError(f"Expected a list for 'students' in {path}")
+    raw_students.append(
+        {
+            "telegram_id": student.telegram_id,
+            "full_name": student.full_name,
+            "subgroup": student.subgroup,
+        }
+    )
+    with path.open("w", encoding="utf-8") as config_file:
+        yaml.safe_dump(
+            data,
+            config_file,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+    config.students.append(student)
 
 
 def _schedule_lessons(value: Any, context: str, path: Path) -> list[Lesson]:
@@ -190,7 +258,7 @@ def _schedule_config(data: dict[str, Any], path: Path) -> ScheduleConfig:
 
 
 def load_config(config_dir: str | Path | None = None) -> AppConfig:
-    """Load and validate bot configuration from four YAML files.
+    """Load and validate bot configuration from five YAML files.
 
     By default, the ``config/`` directory next to this module is used.
     """
@@ -199,11 +267,13 @@ def load_config(config_dir: str | Path | None = None) -> AppConfig:
 
     bot_path = directory / "bot.yaml"
     roles_path = directory / "roles.yaml"
+    students_path = directory / "students.yaml"
     sanctions_path = directory / "sanctions.yaml"
     schedule_path = directory / "schedule.yaml"
 
     bot_data = _load_yaml(bot_path)
     roles_data = _load_yaml(roles_path)
+    students_data = _load_yaml(students_path)
     sanctions_data = _load_yaml(sanctions_path)
     schedule_data = _load_yaml(schedule_path)
 
@@ -218,6 +288,8 @@ def load_config(config_dir: str | Path | None = None) -> AppConfig:
             starosta=_int_list(roles_data, "starosta", roles_path),
             moderators=_int_list(roles_data, "moderators", roles_path),
         ),
+        students=_students_config(students_data, students_path),
+        students_path=students_path,
         sanctions=SanctionsConfig(
             ban_threshold=_required(sanctions_data, "ban_threshold", int, sanctions_path),
             ban_days=_required(sanctions_data, "ban_days", int, sanctions_path),
