@@ -1,0 +1,3 @@
+# Set the class-approved values before using sanctions.
+ban_threshold: 3
+ban_days: 0

@@ -1,0 +1,16 @@
+# Keep local credentials out of the Docker build context; Compose mounts config at runtime.
+config/
+
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*

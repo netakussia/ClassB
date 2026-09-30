@@ -1,0 +1,6 @@
+# Copy this file to bot.yaml on the VPS and fill in real values.
+# Never upload or commit the real bot token.
+token: "REPLACE_WITH_NEW_BOTFATHER_TOKEN"
+timezone: "Europe/Chisinau"
+# Set the Telegram group ID; keep 0 until you know the correct ID.
+group_chat_id: 0
