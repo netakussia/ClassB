@@ -11,10 +11,36 @@ from database.migrations import (
     migrate_homework_subject_uniqueness,
     migrate_homework_target_date,
     migrate_homework_timestamps,
+    migrate_schedule_overrides_cancellation,
 )
 
 
 class HomeworkMigrationTests(unittest.TestCase):
+    def test_schedule_override_cancellation_migration_preserves_existing_rows(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".sqlite") as database_file:
+            engine = create_engine(f"sqlite:///{database_file.name}")
+            with engine.begin() as connection:
+                connection.execute(text("""
+                    CREATE TABLE schedule_overrides (
+                        id INTEGER PRIMARY KEY, target_date DATE NOT NULL,
+                        lesson_number INTEGER NOT NULL, override_type VARCHAR NOT NULL,
+                        new_subject VARCHAR, new_room VARCHAR, new_teacher VARCHAR,
+                        created_by BIGINT NOT NULL, created_at DATETIME NOT NULL
+                    )
+                """))
+                connection.execute(text("""
+                    INSERT INTO schedule_overrides VALUES
+                    (1, '2026-10-22', 1, 'lesson', 'Math', '101', NULL, 10, '2026-10-20')
+                """))
+
+                migrate_schedule_overrides_cancellation(connection)
+                migrate_schedule_overrides_cancellation(connection)
+
+                cancelled = connection.scalar(text(
+                    "SELECT is_cancelled FROM schedule_overrides WHERE id = 1"
+                ))
+                self.assertEqual(cancelled, 0)
+
     def test_missing_target_date_is_backfilled_from_creation_date(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".sqlite") as database_file:
             engine = create_engine(f"sqlite:///{database_file.name}")
@@ -70,9 +96,19 @@ class HomeworkMigrationTests(unittest.TestCase):
                 migrate_homework_timestamps(connection)
                 migrate_homework_target_date(connection)
                 migrate_homework_subject_uniqueness(connection)
+                migrate_homework_subject_uniqueness(connection)
 
                 current = connection.execute(text("SELECT id, text FROM homework")).fetchall()
                 history = connection.execute(text("SELECT homework_id, previous_text, previous_target_date FROM homework_history")).fetchall()
+                self.assertEqual(
+                    connection.scalar(
+                        text(
+                            "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                            "AND name = 'idx_homework_subject_target_date'"
+                        )
+                    ),
+                    1,
+                )
                 self.assertEqual(current, [(2, "new")])
                 self.assertEqual(history, [(2, "old", "2026-01-02")])
                 connection.execute(text("""

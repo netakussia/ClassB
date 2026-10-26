@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import ADMIN_ROLES, add_cancel_button, menu_back_keyboard
+from bot.utils.admin_audit import log_admin_action
+from bot.utils.emojis import get_button_label, get_emoji
 from config_loader import AppConfig
 from database.models import ClassEvent
 
@@ -27,8 +31,8 @@ EVENT_CATEGORIES = {
     "other": "Другое",
 }
 EVENT_PERIODS = (
-    ("📌 На этой неделе", 7),
-    ("📅 В этом месяце", 30),
+    (f"{get_emoji('this_week')} На этой неделе", 7),
+    (f"{get_emoji('month')} В этом месяце", 30),
 )
 
 
@@ -46,8 +50,9 @@ def _category_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     for category, title in EVENT_CATEGORIES.items():
         keyboard.button(
-            text=title,
+            text=get_button_label(title),
             callback_data=EventCategoryCallback(category=category).pack(),
+            style="primary",
         )
     add_cancel_button(keyboard)
     keyboard.adjust(1)
@@ -60,7 +65,7 @@ def _event_sections(
     sections: list[tuple[str, list[ClassEvent]]] = [
         (EVENT_PERIODS[0][0], []),
         (EVENT_PERIODS[1][0], []),
-        ("🔮 Позже", []),
+        (f"{get_emoji('later')} Позже", []),
     ]
     week_end = today + timedelta(days=EVENT_PERIODS[0][1])
     month_end = today + timedelta(days=EVENT_PERIODS[1][1])
@@ -82,8 +87,8 @@ def _format_event_list(events: list[ClassEvent], today: date) -> str:
             lines.append("")
         lines.append(section_title)
         lines.extend(
-            f"• {event.event_date:%d.%m} {event.title} "
-            f"({EVENT_CATEGORIES.get(event.category, event.category)})"
+            f"• {event.event_date:%d.%m} {html.escape(event.title)} "
+            f"({html.escape(EVENT_CATEGORIES.get(event.category, event.category))})"
             for event in section_events
         )
     return "\n".join(lines)
@@ -112,7 +117,11 @@ async def events_handler(
             reply_markup=menu_back_keyboard(),
         )
         return
-    await message.answer(_format_event_list(upcoming, today), reply_markup=menu_back_keyboard())
+    await message.answer(
+        _format_event_list(upcoming, today),
+        reply_markup=menu_back_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def start_event_add(
@@ -229,6 +238,12 @@ async def event_date_handler(
         created_at=datetime.now(timezone.utc),
     )
     session.add(event)
+    await log_admin_action(
+        session,
+        user.id,
+        "Добавил событие",
+        f"название={event.title}, дата={event.event_date:%d.%m.%Y}",
+    )
     await session.commit()
     await state.clear()
     await message.answer(

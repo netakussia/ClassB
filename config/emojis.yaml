@@ -1,0 +1,213 @@
+schedule:
+  unicode: "📅"
+  custom_id: 5208561604987208729
+homework:
+  unicode: "📚"
+  custom_id: 5244658232424670674
+settings:
+  unicode: "⚙️"
+  custom_id: 5258096772776991776
+control:
+  unicode: "🎛️"
+  custom_id: 5974256078026706583
+replacement:
+  unicode: "🔄"
+  custom_id: 5346269127059196142
+cancel:
+  unicode: "❌"
+  custom_id: 5974083768233760323
+success:
+  unicode: "✅"
+  custom_id: 5409029658794537988
+admin:
+  unicode: "🛠️"
+  custom_id: 5235616308359359800
+owner:
+  unicode: "👑"
+  custom_id: 5278775425399559750
+logs:
+  unicode: "📜"
+  custom_id: 5447464938874348535
+shortened:
+  unicode: "⏰"
+  custom_id: 5276412364458059956
+event:
+  unicode: "📅"
+  custom_id: 5431570059480812158
+documents:
+  unicode: "📂"
+  custom_id: 5915834902074364776
+folder:
+  unicode: "📁"
+  custom_id: null
+timer:
+  unicode: "⏱️"
+  custom_id: null
+laboratory:
+  unicode: "📁"
+  custom_id: 5933636721177530300
+manual:
+  unicode: "📚"
+  custom_id: 5458738905903799390
+template:
+  unicode: "📝"
+  custom_id: 5264821604935804414
+cloud:
+  unicode: "☁️"
+  custom_id: 4960732513015170287
+absence:
+  unicode: "🙋"
+  custom_id: 5444909231469771073
+user:
+  unicode: "👤"
+  custom_id: 5339270838627625732
+users:
+  unicode: "👥"
+  custom_id: 6001526766714227911
+cases:
+  unicode: "📋"
+  custom_id: 5244710751284785049
+add:
+  unicode: "➕"
+  custom_id: 5328127928230238350
+edit:
+  unicode: "✏️"
+  custom_id: 5873094527165665327
+confirm:
+  unicode: "✅"
+  custom_id: 5260416304224936047
+decline:
+  unicode: "✋"
+  custom_id: 5413474894111330784
+back:
+  unicode: "🏠"
+  custom_id: 5257965174979042426
+back_arrow:
+  unicode: "⬅️"
+  custom_id: 5830060857530257978
+back_categories:
+  unicode: "🔙"
+  custom_id: 5983506750387523533
+forward:
+  unicode: "➡️"
+  custom_id: 5287267692435218919
+down:
+  unicode: "👇"
+  custom_id: 5193202823411546657
+forbidden:
+  unicode: "⛔"
+  custom_id: 5247149163132493357
+search:
+  unicode: "🔎"
+  custom_id: 5258274739041883702
+attachment:
+  unicode: "📎"
+  custom_id: 5260730055880876557
+date:
+  unicode: "📅"
+  custom_id: 5967412305338568701
+time:
+  unicode: "🕒"
+  custom_id: 5276412364458059956
+deadline:
+  unicode: "⏳"
+  custom_id: 5339517416995039810
+today:
+  unicode: "📍"
+  custom_id: 5213467995237524118
+this_week:
+  unicode: "📌"
+  custom_id: 5280657037687016089
+month:
+  unicode: "📅"
+  custom_id: 5368586326885029698
+tomorrow:
+  unicode: "📅"
+  custom_id: 5193158611018208794
+other_date:
+  unicode: "✍️"
+  custom_id: 5319034516096951391
+room:
+  unicode: "🚪"
+  custom_id: 5452029295109086676
+cancel_lesson:
+  unicode: "❌"
+  custom_id: 5388854183065567723
+warning:
+  unicode: "⚠️"
+  custom_id: 5348535641430830820
+all_day:
+  unicode: "☀️"
+  custom_id: 5307984699115716665
+reminder:
+  unicode: "🔔"
+  custom_id: 5458603043203327669
+activity:
+  unicode: "📜"
+  custom_id: 5386614306081088912
+history:
+  unicode: "📜"
+  custom_id: 5386614306081088912
+restriction:
+  unicode: "🔓"
+  custom_id: 5334527292062322654
+free_slot:
+  unicode: "☕"
+  custom_id: 5442644336300802689
+celebration:
+  unicode: "🥳"
+  custom_id: 5990087379019370780
+morning:
+  unicode: "☀️"
+  custom_id: 5992072826436195070
+evening:
+  unicode: "🌙"
+  custom_id: 5339213032662785803
+help:
+  unicode: "🧭"
+  custom_id: 5427154055711440900
+chat:
+  unicode: "💬"
+  custom_id: 5429500993345692442
+greeting:
+  unicode: "👋"
+  custom_id: 6334794255831139848
+notice:
+  unicode: "📢"
+  custom_id: 5424818078833715060
+light:
+  unicode: "💡"
+  custom_id: 5377722723050995732
+goal:
+  unicode: "🎯"
+  custom_id: 6287439449664000621
+later:
+  unicode: "🔮"
+  custom_id: 5458795152795507932
+trash:
+  unicode: "🗑️"
+  custom_id: 5904542823167824187
+english:
+  unicode: "🇬🇧"
+  custom_id: 5264757962110422026
+french:
+  unicode: "🇫🇷"
+  custom_id: 5771573307153321169
+bullet_empty:
+  unicode: "▫️"
+  custom_id: 5296564926536494773
+star:
+  unicode: "⭐"
+  custom_id: 5222412354825760390
+check:
+  unicode: "✅"
+  custom_id: 5980930633298350051
+save:
+  unicode: "💾"
+  custom_id: 5373342633798167891
+send:
+  unicode: "🚀"
+  custom_id: 5192830415387243122
+view:
+  unicode: "📊"
+  custom_id: 5283284105973233072

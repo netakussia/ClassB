@@ -1,25 +1,32 @@
 from __future__ import annotations
 
+import asyncio
+import html
 import logging
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import MenuCallback, add_cancel_button, menu_back_keyboard
+from bot.utils.admin_audit import log_admin_action
+from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
 from bot.utils.schedule_parser import WEEKDAYS, parse_schedule
 from bot.utils.subjects import all_subjects
+from bot.utils.time_utils import get_configured_week_parity, parse_day_month_date
 from config_loader import AppConfig, Lesson
-from database.models import ScheduleOverride
+from database.models import ScheduleOverride, User
 
 
 router = Router(name="replacements")
@@ -61,22 +68,64 @@ def admin_required(handler):
     return wrapped
 
 
+async def _send_replacement_notifications(
+    bot: Bot,
+    config: AppConfig,
+    session: AsyncSession,
+    text: str,
+) -> tuple[int, int, bool]:
+    recipients = {student.telegram_id for student in config.students}
+    recipients.update(await session.scalars(select(User.telegram_id)))
+
+    group_delivered = False
+    if config.bot.group_chat_id:
+        try:
+            await bot.send_message(
+                chat_id=config.bot.group_chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+            group_delivered = True
+        except TelegramAPIError:
+            logger.exception("Не удалось отправить уведомление о замене в группу")
+
+    sent = 0
+    failed = 0
+    for index, telegram_id in enumerate(sorted(recipients)):
+        try:
+            await bot.send_message(
+                chat_id=telegram_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+            sent += 1
+        except TelegramAPIError:
+            failed += 1
+            logger.info("Не удалось доставить уведомление о замене одному из пользователей")
+        if index + 1 < len(recipients):
+            await asyncio.sleep(0.05)
+    return sent, failed, group_delivered
+
+
 def _date_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="📍 На сегодня",
+        text=get_button_label("На сегодня", icon_key="today"),
         callback_data=ReplaceDateCallback(choice="today").pack(),
+        style="primary",
     )
     keyboard.button(
-        text="🗓 На завтра",
+        text=get_button_label("На завтра", icon_key="tomorrow"),
         callback_data=ReplaceDateCallback(choice="tomorrow").pack(),
+        style="primary",
     )
     keyboard.button(
-        text="✍️ Другая дата",
+        text=get_button_label("Другая дата", icon_key="date"),
         callback_data=ReplaceDateCallback(choice="other").pack(),
+        style="primary",
     )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     add_cancel_button(keyboard)
@@ -87,9 +136,50 @@ def _date_keyboard() -> InlineKeyboardMarkup:
 def _subject_keyboard(config: AppConfig) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     for index, subject in enumerate(all_subjects(config)):
-        keyboard.button(text=subject, callback_data=ReplaceSubjectCallback(action="select", subject_index=index).pack())
-    keyboard.button(text="➕ Добавить новый предмет в список", callback_data=ReplaceSubjectCallback(action="new", subject_index=0).pack())
-    keyboard.button(text="🏠 В меню", callback_data=MenuCallback(action="home").pack())
+        keyboard.button(
+            text=get_button_label(subject),
+            callback_data=ReplaceSubjectCallback(
+                action="select",
+                subject_index=index,
+            ).pack(),
+        )
+    keyboard.button(
+        text=get_button_label("Добавить новый предмет в список", icon_key="add"),
+        callback_data=ReplaceSubjectCallback(action="new", subject_index=0).pack(),
+        style="primary",
+    )
+    keyboard.button(
+        text=get_button_label("В меню", icon_key="back_arrow"),
+        callback_data=MenuCallback(action="home").pack(),
+    )
+    add_cancel_button(keyboard)
+    keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+def _lesson_picker_keyboard(
+    overrides: dict[int, ScheduleOverride],
+) -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    for lesson_number in range(1, 7):
+        override = overrides.get(lesson_number)
+        icon_key = None
+        button_options: dict[str, str] = {}
+        if override is not None and override.is_cancelled:
+            icon_key = "cancel_lesson"
+            button_options["style"] = "danger"
+        elif override is not None:
+            icon_key = "replacement"
+            button_options["style"] = "success"
+        keyboard.button(
+            text=get_button_label(f"{lesson_number} пара", icon_key=icon_key),
+            callback_data=f"replace:lesson:{lesson_number}",
+            **button_options,
+        )
+    keyboard.button(
+        text=get_button_label("В меню", icon_key="back_arrow"),
+        callback_data=MenuCallback(action="home").pack(),
+    )
     add_cancel_button(keyboard)
     keyboard.adjust(1)
     return keyboard.as_markup()
@@ -100,24 +190,19 @@ def _local_today(config: AppConfig) -> date:
 
 
 def _parse_short_date(value: str, today: date) -> date | None:
-    try:
-        day_text, month_text = value.split(".")
-        if len(day_text) != 2 or len(month_text) != 2:
-            return None
-        target_date = date(today.year, int(month_text), int(day_text))
-        if target_date < today:
-            target_date = date(today.year + 1, int(month_text), int(day_text))
-        return target_date
-    except ValueError:
-        return None
+    return parse_day_month_date(value, today)
 
 
-def _lessons_for_date(target_date: date, config: AppConfig) -> list[Lesson]:
+async def _lessons_for_date(
+    target_date: date,
+    config: AppConfig,
+    session: AsyncSession,
+) -> list[Lesson]:
     weekday = target_date.weekday()
     if weekday >= len(WEEKDAYS):
         return []
     schedule = parse_schedule(config.schedule)
-    parity = schedule.get_parity(target_date)
+    parity = await get_configured_week_parity(session, target_date, config)
     return schedule.lessons_for(WEEKDAYS[weekday], parity)
 
 
@@ -125,37 +210,26 @@ async def _ask_for_lesson(
     message: Message,
     state: FSMContext,
     target_date: date,
-    config: AppConfig,
+    session: AsyncSession,
     replace_message: bool = False,
 ) -> None:
-    try:
-        lessons = _lessons_for_date(target_date, config)
-    except ValueError:
-        await message.answer("Расписание недоступно. Выбери другую дату.")
-        return
-    if not lessons:
-        await message.answer(f"На {target_date:%d.%m.%Y} уроков нет. Выбери другую дату.")
-        return
-
-    await state.update_data(target_date=target_date.isoformat(), lesson_count=len(lessons))
+    await state.update_data(target_date=target_date.isoformat())
     await state.set_state(ReplaceForm.lesson_number)
-    keyboard = InlineKeyboardBuilder()
-    for lesson_number, lesson in enumerate(lessons, start=1):
-        keyboard.button(
-            text=f"{lesson_number}. {lesson.subject}",
-            callback_data=f"replace:lesson:{lesson_number}",
-        )
-    keyboard.button(
-        text="🏠 В меню",
-        callback_data=MenuCallback(action="home").pack(),
+    override_rows = await session.scalars(
+        select(ScheduleOverride)
+        .where(ScheduleOverride.target_date == target_date)
+        .order_by(ScheduleOverride.lesson_number, ScheduleOverride.id)
     )
-    add_cancel_button(keyboard)
-    keyboard.adjust(1)
-    prompt = f"Выбери урок для замены на {target_date:%d.%m.%Y}:"
+    overrides = {
+        override.lesson_number: override
+        for override in override_rows
+    }
+    keyboard = _lesson_picker_keyboard(overrides)
+    prompt = f"Выбери пару для замены или отмены на {target_date:%d.%m.%Y}:"
     if replace_message:
-        await message.edit_text(prompt, reply_markup=keyboard.as_markup())
+        await message.edit_text(prompt, reply_markup=keyboard)
     else:
-        await message.answer(prompt, reply_markup=keyboard.as_markup())
+        await message.answer(prompt, reply_markup=keyboard)
 
 
 async def start_replacement_form(
@@ -169,8 +243,9 @@ async def start_replacement_form(
     await state.clear()
     await state.set_state(ReplaceForm.target_date)
     await message.answer(
-        "🔁 ДОБАВЛЯЕМ ЗАМЕНУ\n\nНа какую дату?",
+        f"{get_emoji('replacement')} ДОБАВЛЯЕМ ЗАМЕНУ\n\nНа какую дату?",
         reply_markup=_date_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -183,9 +258,9 @@ async def _select_replacement_date(
     message: Message,
     state: FSMContext,
     target_date: date,
-    config: AppConfig,
+    session: AsyncSession,
 ) -> None:
-    await _ask_for_lesson(message, state, target_date, config)
+    await _ask_for_lesson(message, state, target_date, session)
 
 
 @router.callback_query(ReplaceForm.target_date, ReplaceDateCallback.filter())
@@ -195,6 +270,7 @@ async def replace_date_choice_handler(
     callback_data: ReplaceDateCallback,
     state: FSMContext,
     config: AppConfig,
+    session: AsyncSession,
     role: str,
 ) -> None:
     if callback.message is None:
@@ -218,7 +294,7 @@ async def replace_date_choice_handler(
         callback.message,
         state,
         target_date,
-        config,
+        session,
         replace_message=True,
     )
 
@@ -229,6 +305,7 @@ async def replace_date_handler(
     message: Message,
     state: FSMContext,
     config: AppConfig,
+    session: AsyncSession,
     role: str,
 ) -> None:
     value = (message.text or "").strip()
@@ -242,7 +319,7 @@ async def replace_date_handler(
     if target_date is None:
         await message.answer("Нужна дата строго в формате ДД.ММ, например 05.10.")
         return
-    await _select_replacement_date(message, state, target_date, config)
+    await _select_replacement_date(message, state, target_date, session)
 
 
 @router.message(ReplaceForm.target_date)
@@ -259,14 +336,12 @@ async def replace_lesson_handler(
     role: str,
 ) -> None:
     raw_number = (callback.data or "").removeprefix("replace:lesson:")
-    data = await state.get_data()
-    lesson_count = data.get("lesson_count")
     try:
         lesson_number = int(raw_number)
     except ValueError:
         await callback.answer("Некорректный номер урока.", show_alert=True)
         return
-    if not isinstance(lesson_count, int) or lesson_number not in range(1, lesson_count + 1):
+    if lesson_number not in range(1, 7):
         await state.clear()
         await callback.answer("Данные замены потерялись. Начни ещё раз.", show_alert=True)
         return
@@ -274,14 +349,27 @@ async def replace_lesson_handler(
     await state.update_data(lesson_number=lesson_number)
     await state.set_state(ReplaceForm.override_type)
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🚪 Кабинет", callback_data="replace:type:room")
-    keyboard.button(text="🔄 Урок целиком", callback_data="replace:type:lesson")
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("Кабинет", icon_key="room"),
+        callback_data="replace:type:room",
+        style="primary",
+    )
+    keyboard.button(
+        text=get_button_label("Урок целиком", icon_key="replacement"),
+        callback_data="replace:type:lesson",
+        style="primary",
+    )
+    keyboard.button(
+        text=get_button_label("Отменить пару", icon_key="cancel_lesson"),
+        callback_data="replace:type:cancel",
+        style="danger",
+    )
+    keyboard.button(
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     add_cancel_button(keyboard)
-    keyboard.adjust(2, 1)
+    keyboard.adjust(2, 1, 1)
     await callback.answer()
     if callback.message is not None:
         await callback.message.edit_text("Что нужно заменить?", reply_markup=keyboard.as_markup())
@@ -294,8 +382,70 @@ async def replace_type_handler(
     state: FSMContext,
     role: str,
     config: AppConfig,
+    session: AsyncSession,
+    bot: Bot,
 ) -> None:
     override_type = (callback.data or "").removeprefix("replace:type:")
+    if override_type == "cancel":
+        data = await state.get_data()
+        target_date_value = data.get("target_date")
+        lesson_number = data.get("lesson_number")
+        if (
+            not isinstance(target_date_value, str)
+            or not isinstance(lesson_number, int)
+        ):
+            await state.clear()
+            await callback.answer("Данные замены потерялись. Начни ещё раз.", show_alert=True)
+            return
+        override = ScheduleOverride(
+            target_date=date.fromisoformat(target_date_value),
+            lesson_number=lesson_number,
+            override_type="lesson",
+            new_subject=None,
+            new_room=None,
+            new_teacher=None,
+            is_cancelled=True,
+            created_by=callback.from_user.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(override)
+        await log_admin_action(
+            session,
+            callback.from_user.id,
+            "Отменил пару",
+            f"дата={target_date_value}, пара={lesson_number}",
+        )
+        await session.commit()
+        await state.clear()
+        target_date = date.fromisoformat(target_date_value)
+        lessons = await _lessons_for_date(target_date, config, session)
+        subject = (
+            lessons[lesson_number - 1].subject
+            if lesson_number <= len(lessons)
+            else "Предмет не указан"
+        )
+        notification = (
+            f"{get_emoji('cancel_lesson')} Замена на {target_date:%d.%m.%Y}\n"
+            f"Предмет: {html.escape(subject)}\n"
+            f"Пара: {lesson_number}\n"
+            "Занятие отменено."
+        )
+        sent, failed, group_delivered = await _send_replacement_notifications(
+            bot,
+            config,
+            session,
+            notification,
+        )
+        await callback.answer("Пара отменена.")
+        if callback.message is not None:
+            await callback.message.edit_text(
+                f"{get_emoji('success')} Отмена пары сохранена.\n"
+                f"ЛС: отправлено {sent}, ошибок/заблокировали {failed}.\n"
+                + ("Группа уведомлена." if group_delivered else "Групповое уведомление не отправлено."),
+                reply_markup=menu_back_keyboard(),
+                parse_mode=ParseMode.HTML,
+            )
+        return
     if override_type not in {"room", "lesson"}:
         await callback.answer("Неизвестный тип замены.", show_alert=True)
         return
@@ -341,8 +491,16 @@ async def replace_new_subject_name_handler(message: Message, state: FSMContext, 
         return
     await state.update_data(pending_new_subject=subject)
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="✅ Да, добавить", callback_data=ReplaceSubjectCallback(action="confirm_new", subject_index=0).pack())
-    keyboard.button(text="✋ Отмена", callback_data=ReplaceSubjectCallback(action="cancel_new", subject_index=0).pack())
+    keyboard.button(
+        text=get_button_label("Да, добавить", icon_key="success"),
+        callback_data=ReplaceSubjectCallback(action="confirm_new", subject_index=0).pack(),
+        style="success",
+    )
+    keyboard.button(
+        text=get_button_label("Отмена", icon_key="cancel"),
+        callback_data=ReplaceSubjectCallback(action="cancel_new", subject_index=0).pack(),
+        style="danger",
+    )
     add_cancel_button(keyboard)
     keyboard.adjust(2)
     await message.answer(f"Такого предмета нет в расписании, точно добавить «{subject}» как новый?", reply_markup=keyboard.as_markup())
@@ -408,11 +566,12 @@ async def replace_data_handler(
         return
     try:
         target_date = date.fromisoformat(target_date_value)
-        base_lesson = _lessons_for_date(target_date, config)[lesson_number - 1]
-    except (IndexError, ValueError):
+        lessons = await _lessons_for_date(target_date, config, session)
+    except ValueError:
         await state.clear()
-        await message.answer("Базовое расписание изменилось. Начни ещё раз из меню.", reply_markup=menu_back_keyboard())
+        await message.answer("Расписание недоступно. Начни ещё раз из меню.", reply_markup=menu_back_keyboard())
         return
+    base_lesson = lessons[lesson_number - 1] if lesson_number <= len(lessons) else None
 
     new_subject: str | None = None
     new_room: str
@@ -438,34 +597,52 @@ async def replace_data_handler(
         new_subject=new_subject,
         new_room=new_room,
         new_teacher=new_teacher,
+        is_cancelled=False,
         created_by=message.from_user.id,
         created_at=datetime.now(timezone.utc),
     )
     session.add(override)
+    await log_admin_action(
+        session,
+        message.from_user.id,
+        "Создал замену",
+        f"тип={override_type}, дата={target_date:%d.%m.%Y}, пара={lesson_number}, "
+        f"предмет={new_subject or (base_lesson.subject if base_lesson else 'свободное окно')}, "
+        f"кабинет={new_room}",
+    )
     await session.commit()
     await state.clear()
 
     if override_type == "room":
+        base_subject = base_lesson.subject if base_lesson is not None else "свободное окно"
+        old_room = base_lesson.room if base_lesson is not None else "не указан"
         notification = (
-            f"📍 Замена {target_date:%d.%m.%Y}: {base_lesson.subject} "
-            f"({lesson_number} пара) — кабинет {new_room} вместо {base_lesson.room}"
+            f"{get_emoji('today')} Замена на {target_date:%d.%m.%Y}\n"
+            f"Предмет: {html.escape(base_subject)}\n"
+            f"Пара: {lesson_number}\n"
+            f"Новый кабинет: {html.escape(new_room)} "
+            f"(вместо {html.escape(old_room)})"
         )
     else:
+        base_subject = base_lesson.subject if base_lesson is not None else "свободное окно"
         notification = (
-            f"🔄 Замена {target_date:%d.%m.%Y}: {lesson_number} пара — вместо "
-            f"{base_lesson.subject} будет {new_subject} (каб. {new_room})"
+            f"{get_emoji('replacement')} Замена на {target_date:%d.%m.%Y}\n"
+            f"Предмет: {html.escape(new_subject or '')}\n"
+            f"Пара: {lesson_number}\n"
+            f"Вместо: {html.escape(base_subject)}\n"
+            f"Новый кабинет: {html.escape(new_room)}"
         )
 
-    if config.bot.group_chat_id == 0:
-        await message.answer(
-            "Замена сохранена, но не разослана: укажите group_chat_id в config/bot.yaml.",
-            reply_markup=menu_back_keyboard(),
-        )
-        return
-    try:
-        await bot.send_message(chat_id=config.bot.group_chat_id, text=notification)
-    except TelegramAPIError:
-        logger.exception("Не удалось отправить уведомление о замене в группу")
-        await message.answer("Замена сохранена, но рассылку в группу выполнить не удалось.", reply_markup=menu_back_keyboard())
-        return
-    await message.answer("✅ Замена сохранена и разослана в группу.", reply_markup=menu_back_keyboard())
+    sent, failed, group_delivered = await _send_replacement_notifications(
+        bot,
+        config,
+        session,
+        notification,
+    )
+    await message.answer(
+        f"{get_emoji('success')} Замена сохранена.\n"
+        f"ЛС: отправлено {sent}, ошибок/заблокировали {failed}.\n"
+        + ("Группа уведомлена." if group_delivered else "Групповое уведомление не отправлено."),
+        reply_markup=menu_back_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )

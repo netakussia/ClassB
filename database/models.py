@@ -18,6 +18,8 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String, nullable=True)
     username: Mapped[str | None] = mapped_column(String, nullable=True)
     subgroup: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_action: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     false_absences_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -64,7 +66,43 @@ class ScheduleOverride(Base):
     new_subject: Mapped[str | None] = mapped_column(String, nullable=True)
     new_room: Mapped[str | None] = mapped_column(String, nullable=True)
     new_teacher: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_cancelled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     created_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ScheduleTimeOverride(Base):
+    __tablename__ = "schedule_time_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    lesson_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    big_break_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BotSetting(Base):
+    __tablename__ = "bot_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class DynamicRole(Base):
+    __tablename__ = "dynamic_roles"
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class AdminActionLog(Base):
+    __tablename__ = "admin_action_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    details: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

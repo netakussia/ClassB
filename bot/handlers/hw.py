@@ -12,12 +12,13 @@ from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.filters.command import CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.ui import MenuCallback, remove_inline_screen
-from bot.utils.subjects import all_subjects
+from bot.keyboards.inline import InlineKeyboardBuilder
+from bot.ui import MenuCallback, edit_text_if_changed, remove_inline_screen
+from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
+from bot.utils.subjects import all_subjects, resolve_subject
 from bot.utils.homework_dates import (
     homework_target_date,
     local_today,
@@ -35,6 +36,40 @@ TELEGRAM_TEXT_LIMIT = 4000
 class HomeworkNavigationCallback(CallbackData, prefix="hwui"):
     action: str
     subject_index: int
+
+
+def _homework_subject_keyboard(
+    subjects: list[str],
+    homework_subjects: set[str],
+) -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    for index, subject in enumerate(subjects):
+        has_hw = subject in homework_subjects
+        if has_hw:
+            mark = get_btn_emoji("check")
+            button_options = {"style": "success"}
+        else:
+            mark = "◾"
+            button_options = {}
+        keyboard.button(
+            text=f"{mark} {subject}",
+            callback_data=HomeworkNavigationCallback(
+                action="day_subject",
+                subject_index=index,
+            ).pack(),
+            **button_options,
+        )
+    keyboard.button(
+        text=get_button_label("Найти ДЗ по предмету", icon_key="search"),
+        callback_data=HomeworkNavigationCallback(action="subjects", subject_index=0).pack(),
+        style="primary",
+    )
+    keyboard.button(
+        text=get_button_label("В меню", icon_key="back_arrow"),
+        callback_data=MenuCallback(action="home").pack(),
+    )
+    keyboard.adjust(1)
+    return keyboard.as_markup()
 
 
 async def _answer_long_text(
@@ -103,15 +138,17 @@ def _updated_label(updated_at: datetime, timezone_name: str) -> str:
 def _homework_actions_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="🔎 ДЗ по предмету",
+        text=get_button_label("ДЗ по предмету", icon_key="search"),
         callback_data=HomeworkNavigationCallback(action="subjects", subject_index=0).pack(),
+        style="primary",
     )
     keyboard.button(
-        text="📚 ДЗ на ближайший учебный день",
+        text=get_button_label("ДЗ на ближайший учебный день", icon_key="homework"),
         callback_data=HomeworkNavigationCallback(action="day", subject_index=0).pack(),
+        style="primary",
     )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     keyboard.adjust(1)
@@ -122,17 +159,20 @@ def _subject_picker_keyboard(config: AppConfig) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     for index, subject in enumerate(all_subjects(config)):
         keyboard.button(
-            text=subject,
+            text=get_button_label(subject),
             callback_data=HomeworkNavigationCallback(
                 action="subject", subject_index=index
             ).pack(),
         )
     keyboard.button(
-        text="⬅️ К ДЗ на ближайший учебный день",
+        text=get_button_label(
+            "К ДЗ на ближайший учебный день",
+            icon_key="back_arrow",
+        ),
         callback_data=HomeworkNavigationCallback(action="day", subject_index=0).pack(),
     )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     keyboard.adjust(1)
@@ -186,18 +226,23 @@ async def _homework_lines(
     session: AsyncSession,
     heading: str,
 ) -> list[str]:
-    lines = [f"{heading}: {homework.subject}"]
-    lines.append(f"🗓 На дату: {homework.target_date:%d.%m.%Y}")
+    lines = [
+        f"{heading}: <b>{html.escape(homework.subject)}</b>"
+    ]
+    lines.append(f"{get_emoji('date')} На дату: {homework.target_date:%d.%m.%Y}")
     created_label = _updated_label(homework.created_at, config.bot.timezone)
-    lines.append(f"🕒 Добавлено: {created_label}")
+    lines.append(f"{get_emoji('time')} Добавлено: {created_label}")
     if homework.updated_at != homework.created_at:
-        lines.append(f"✏️ Обновлено: {_updated_label(homework.updated_at, config.bot.timezone)}")
+        lines.append(
+            f"{get_emoji('edit')} Обновлено: "
+            f"{_updated_label(homework.updated_at, config.bot.timezone)}"
+        )
     if homework.is_deadline and homework.deadline_date is not None:
-        lines.append(f"⏳ Дедлайн: {homework.deadline_date:%d.%m.%Y}")
+        lines.append(f"{get_emoji('deadline')} Дедлайн: {homework.deadline_date:%d.%m.%Y}")
     if homework.text:
-        lines.extend(["", homework.text])
+        lines.extend(["", f"<blockquote>{html.escape(homework.text)}</blockquote>"])
     elif homework.attachments:
-        lines.extend(["", "📎 Вложения отправлены ниже."])
+        lines.extend(["", f"{get_emoji('attachment')} Вложения отправлены ниже."])
     else:
         lines.extend(["", "Текст и вложения не указаны."])
     return lines
@@ -211,12 +256,25 @@ async def _edit_homework_record(
     """Keep callback screens valid even when a homework text exceeds Telegram's limit."""
     text = "\n".join(lines)
     if len(text) <= TELEGRAM_TEXT_LIMIT:
-        await message.edit_text(text, reply_markup=_homework_actions_keyboard())
-    else:
-        await message.edit_text(
-            f"📚 ДЗ: {homework.subject}\n\nСообщение длинное — отправляю его ниже.",
+        await edit_text_if_changed(
+            message,
+            text,
+            reply_markup=_homework_actions_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
-        await _answer_long_text(message, text, reply_markup=_homework_actions_keyboard())
+    else:
+        await edit_text_if_changed(
+            message,
+            f"{get_emoji('homework')} ДЗ: {html.escape(homework.subject)}\n\n"
+            "Сообщение длинное — отправляю его ниже.",
+            parse_mode=ParseMode.HTML,
+        )
+        await _answer_long_text(
+            message,
+            text,
+            reply_markup=_homework_actions_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
     await _send_homework_attachments(message, homework)
 
 
@@ -266,21 +324,13 @@ async def show_tomorrow_homework(
     )
     regular_by_subject = {homework.subject: homework for homework in homework_result}
 
-    keyboard = InlineKeyboardBuilder()
-    for index, subject in enumerate(subjects):
-        mark = "✅" if subject in regular_by_subject else "▫️"
-        keyboard.button(text=f"{mark} {subject}", callback_data=HomeworkNavigationCallback(action="day_subject", subject_index=index).pack())
-    keyboard.button(
-        text="🔎 Найти ДЗ по предмету",
-        callback_data=HomeworkNavigationCallback(action="subjects", subject_index=0).pack(),
-    )
-    keyboard.button(text="🏠 В меню", callback_data=MenuCallback(action="home").pack())
-    keyboard.adjust(1)
     await message.answer(
-        f"📚 ДЗ на {target_date:%d.%m.%Y}\n\n"
-        "✅ — задание есть\n▫️ — пока ничего не задано\n\n"
+        f"{get_emoji('homework')} ДЗ на {target_date:%d.%m.%Y}\n\n"
+        f"{get_emoji('check')} — задание есть\n"
+        f"{get_emoji('bullet_empty')} — пока ничего не задано\n\n"
         "Выбери предмет:",
-        reply_markup=keyboard.as_markup(),
+        reply_markup=_homework_subject_keyboard(subjects, set(regular_by_subject)),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -297,24 +347,34 @@ async def homework_handler(
         await show_tomorrow_homework(message, config, session)
         return
 
-    today = local_today(config)
-    homework = await _latest_homework_for_subject(session, subject_query, today)
-    future_date = await next_lesson_date(
-        session,
-        subject_query,
-        config,
-        today,
-        inclusive=False,
-    )
-    future_homework = (
-        await _latest_homework_for_subject(session, subject_query, future_date)
-        if future_date is not None
-        else None
-    )
+    try:
+        subject = resolve_subject(subject_query, config) or subject_query
+        today = local_today(config)
+        homework = await _latest_homework_for_subject(session, subject, today)
+        future_date = await next_lesson_date(
+            session,
+            subject,
+            config,
+            today,
+            inclusive=False,
+        )
+        future_homework = (
+            await _latest_homework_for_subject(session, subject, future_date)
+            if future_date is not None
+            else None
+        )
+    except ValueError:
+        await message.answer(
+            "Не удалось обработать предмет или расписание. "
+            "Проверь название предмета или обратись к администратору.",
+            reply_markup=_homework_actions_keyboard(),
+        )
+        return
     if homework is None and future_homework is None:
         await message.answer(
-            f"По предмету «{subject_query}» пока нет ДЗ.",
+            f"По предмету «{html.escape(subject_query)}» пока нет ДЗ.",
             reply_markup=_homework_actions_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
         return
     primary = homework or future_homework
@@ -323,15 +383,23 @@ async def homework_handler(
         primary,
         config,
         session,
-        "📚 ДЗ на сегодня" if homework is not None else "📚 ДЗ на следующий урок",
+        f"{get_emoji('homework')} ДЗ на сегодня"
+        if homework is not None
+        else f"{get_emoji('homework')} ДЗ на следующий урок",
     )
     if homework is not None and future_homework is not None:
         future_text = future_homework.text or "Текст не указан."
         lines.extend([
             "",
-            f"📌 На следующий урок ({future_homework.target_date:%d.%m}): {future_text}",
+            f"{get_emoji('today')} На следующий урок "
+            f"({future_homework.target_date:%d.%m}): {html.escape(future_text)}",
         ])
-    await _answer_long_text(message, "\n".join(lines), reply_markup=_homework_actions_keyboard())
+    await _answer_long_text(
+        message,
+        "\n".join(lines),
+        reply_markup=_homework_actions_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
     await _send_homework_attachments(message, primary)
 
 
@@ -346,9 +414,11 @@ async def homework_subject_picker_handler(
         await callback.answer("Открой меню ещё раз.", show_alert=True)
         return
     await callback.answer()
-    await callback.message.edit_text(
-        "🔎 ДЗ ПО ПРЕДМЕТУ\n\nВыбери предмет:",
+    await edit_text_if_changed(
+        callback.message,
+        f"{get_emoji('search')} ДЗ ПО ПРЕДМЕТУ\n\nВыбери предмет:",
         reply_markup=_subject_picker_keyboard(config),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -370,20 +440,41 @@ async def homework_subject_handler(
         return
 
     subject = subjects[callback_data.subject_index]
+    today = local_today(config)
     homework = await _latest_homework_for_subject(
         session,
         subject,
-        local_today(config),
+        today,
     )
+    if homework is None:
+        future_date = await next_lesson_date(
+            session,
+            subject,
+            config,
+            today,
+            inclusive=False,
+        )
+        if future_date is not None:
+            homework = await _latest_homework_for_subject(
+                session,
+                subject,
+                future_date,
+            )
     await callback.answer()
     if homework is None:
-        await callback.message.edit_text(
+        await edit_text_if_changed(
+            callback.message,
             f"По «{subject}» пока ничего не задано.",
             reply_markup=_homework_actions_keyboard(),
         )
         return
 
-    lines = await _homework_lines(homework, config, session, "📚 Последнее ДЗ")
+    lines = await _homework_lines(
+        homework,
+        config,
+        session,
+        f"{get_emoji('homework')} Последнее ДЗ",
+    )
     await _edit_homework_record(callback.message, lines, homework)
 
 
@@ -404,9 +495,18 @@ async def homework_day_subject_handler(callback: CallbackQuery, callback_data: H
     homework = await _latest_homework_for_subject(session, subject, target_date)
     await callback.answer()
     if homework is None:
-        await callback.message.edit_text(f"По «{subject}» пока ничего не задано.", reply_markup=_homework_actions_keyboard())
+        await edit_text_if_changed(
+            callback.message,
+            f"По «{subject}» пока ничего не задано.",
+            reply_markup=_homework_actions_keyboard(),
+        )
         return
-    lines = await _homework_lines(homework, config, session, "📚 ДЗ")
+    lines = await _homework_lines(
+        homework,
+        config,
+        session,
+        f"{get_emoji('homework')} ДЗ",
+    )
     await _edit_homework_record(callback.message, lines, homework)
 
 

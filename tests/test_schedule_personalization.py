@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, text
+import yaml
 
 from bot.handlers.schedule import (
     _lesson_subgroup,
@@ -13,12 +15,46 @@ from bot.handlers.schedule import (
     _personalized_lessons,
     _weekend_easter_egg,
 )
+from bot.handlers.replacements import _parse_short_date
+from bot.utils.time_utils import parse_day_month_date
 from config_loader import Lesson, load_config
 from database.migrations import migrate_users
 
 
 def _lesson(time: str, subject: str, subgroup: str | None = None) -> Lesson:
     return Lesson(time=time, subject=subject, room="101", teacher="Teacher", subgroup=subgroup)
+
+
+def _write_test_config(directory: Path) -> None:
+    config_files = {
+        "bot.yaml": "token: test-token\ntimezone: Europe/Chisinau\ngroup_chat_id: 0\n",
+        "roles.yaml": "owner: []\nstarosta: []\nmoderators: []\n",
+        "students.yaml": (
+            "students:\n"
+            "  - telegram_id: 123456789\n"
+            "    full_name: Иванов Иван\n"
+            "    subgroup: english\n"
+        ),
+        "sanctions.yaml": "ban_threshold: 3\nban_days: 0\n",
+    }
+    for filename, content in config_files.items():
+        (directory / filename).write_text(content, encoding="utf-8")
+
+    schedule = {
+        "week_parity": {
+            "reference_date": "2026-09-28",
+            "reference_parity": "odd",
+        },
+        "lesson_duration_minutes": 90,
+        **{
+            weekday: {"odd": [], "even": []}
+            for weekday in ("monday", "tuesday", "wednesday", "thursday", "friday")
+        },
+    }
+    (directory / "schedule.yaml").write_text(
+        yaml.safe_dump(schedule, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 class SchedulePersonalizationTests(unittest.TestCase):
@@ -53,16 +89,41 @@ class SchedulePersonalizationTests(unittest.TestCase):
     def test_schedule_date_formats_and_weekend_boundary(self) -> None:
         self.assertEqual(_parse_target_date("2026-10-05").isoformat(), "2026-10-05")
         self.assertEqual(_parse_target_date("05.10.2026").isoformat(), "2026-10-05")
+        with self.assertRaisesRegex(ValueError, "Укажите дату"):
+            _parse_target_date("31.02.2026")
         self.assertTrue(_weekend_easter_egg(datetime(2026, 10, 2, 16, 0)))
         self.assertFalse(_weekend_easter_egg(datetime(2026, 10, 2, 15, 59)))
         self.assertTrue(_weekend_easter_egg(datetime(2026, 10, 3, 9, 0)))
 
+    def test_short_date_parser_finds_next_leap_year(self) -> None:
+        self.assertEqual(
+            parse_day_month_date("29.02", datetime(2025, 3, 1).date()),
+            datetime(2028, 2, 29).date(),
+        )
+        self.assertEqual(
+            _parse_short_date("29.02", datetime(2024, 3, 1).date()),
+            datetime(2028, 2, 29).date(),
+        )
+        self.assertIsNone(
+            parse_day_month_date("31.02", datetime(2025, 1, 1).date())
+        )
+
     def test_bot_token_can_be_overridden_by_environment(self) -> None:
-        with patch.dict("os.environ", {"BOT_TOKEN": "test-token"}):
-            self.assertEqual(load_config().bot.token, "test-token")
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            _write_test_config(config_dir)
+            with patch.dict("os.environ", {"BOT_TOKEN": "environment-test-token"}):
+                self.assertEqual(
+                    load_config(config_dir).bot.token,
+                    "environment-test-token",
+                )
 
     def test_students_roster_is_loaded_with_authoritative_profile_fields(self) -> None:
-        students = load_config().students
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            _write_test_config(config_dir)
+            with patch.dict("os.environ", {"BOT_TOKEN": "roster-test-token"}):
+                students = load_config(config_dir).students
 
         self.assertEqual(students[0].telegram_id, 123456789)
         self.assertEqual(students[0].full_name, "Иванов Иван")
@@ -73,12 +134,22 @@ class SchedulePersonalizationTests(unittest.TestCase):
             engine = create_engine(f"sqlite:///{database_file.name}")
             with engine.begin() as connection:
                 connection.execute(text("CREATE TABLE users (telegram_id BIGINT PRIMARY KEY)"))
+                connection.execute(text("INSERT INTO users (telegram_id) VALUES (123)"))
 
+                migrate_users(connection)
                 migrate_users(connection)
 
                 columns = {column["name"]: column for column in inspect(connection).get_columns("users")}
                 self.assertIn("subgroup", columns)
+                self.assertIn("last_action", columns)
+                self.assertIn("last_active_at", columns)
                 self.assertTrue(columns["subgroup"]["nullable"])
+                self.assertTrue(columns["last_action"]["nullable"])
+                self.assertTrue(columns["last_active_at"]["nullable"])
+                self.assertEqual(
+                    connection.scalar(text("SELECT telegram_id FROM users")),
+                    123,
+                )
 
 
 if __name__ == "__main__":

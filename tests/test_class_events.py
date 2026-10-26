@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import re
 import unittest
 
 from bot.handlers.events import _format_event_list
@@ -28,7 +29,11 @@ class ClassEventTests(unittest.TestCase):
             _event(date(2026, 11, 1), "Позже месяца"),
         ]
 
-        result = _format_event_list(events, today)
+        result = re.sub(
+            r'<tg-emoji emoji-id="[0-9]+">(.*?)</tg-emoji>',
+            r"\1",
+            _format_event_list(events, today),
+        )
 
         self.assertIn("📌 На этой неделе\n• 01.10 Сегодня (Зачёты/Модули)", result)
         self.assertIn("• 08.10 Через неделю (Праздники/ДР)", result)
