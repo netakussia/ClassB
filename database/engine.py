@@ -11,6 +11,10 @@ from database.migrations import (
     migrate_homework_subject_uniqueness,
     migrate_homework_timestamps,
     migrate_homework_target_date,
+    migrate_admin_action_logs,
+    migrate_dynamic_roles,
+    migrate_schedule_overrides_cancellation,
+    migrate_schedule_time_overrides,
     migrate_users,
 )
 from database.models import Base
@@ -36,3 +40,7 @@ async def init_db() -> None:
         await connection.run_sync(migrate_homework_target_date)
         await connection.run_sync(migrate_homework_subject_uniqueness)
         await connection.run_sync(migrate_users)
+        await connection.run_sync(migrate_schedule_overrides_cancellation)
+        await connection.run_sync(migrate_admin_action_logs)
+        await connection.run_sync(migrate_dynamic_roles)
+        await connection.run_sync(migrate_schedule_time_overrides)

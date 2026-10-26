@@ -56,6 +56,18 @@ def migrate_homework_timestamps(connection: Connection) -> None:
 
 def migrate_homework_subject_uniqueness(connection: Connection) -> None:
     """Archive duplicate subject/date rows and enforce the composite key."""
+    if connection.dialect.name == "sqlite":
+        index_exists = connection.scalar(
+            text(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'homework' "
+                "AND name = 'idx_homework_subject_target_date' "
+                "AND upper(sql) LIKE 'CREATE UNIQUE INDEX%'"
+            )
+        )
+        if index_exists:
+            return
+
     rows = connection.execute(text(
         "SELECT id, subject, text, attachments, target_date, is_deadline, deadline_date, "
         "updated_by, updated_at FROM homework "
@@ -96,6 +108,10 @@ def migrate_homework_subject_uniqueness(connection: Connection) -> None:
     )
     target_key = frozenset({"subject", "target_date"})
     if target_key in unique_keys:
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_homework_subject_target_date "
+            "ON homework (subject, target_date)"
+        ))
         return
 
     if connection.dialect.name != "sqlite":
@@ -113,6 +129,10 @@ def migrate_homework_subject_uniqueness(connection: Connection) -> None:
     connection.execute(text("PRAGMA defer_foreign_keys = ON"))
     connection.execute(text("DROP TABLE homework"))
     connection.execute(text("ALTER TABLE _homework_new RENAME TO homework"))
+    connection.execute(text(
+        "CREATE UNIQUE INDEX idx_homework_subject_target_date "
+        "ON homework (subject, target_date)"
+    ))
 
 
 def migrate_users(connection: Connection) -> None:
@@ -123,3 +143,54 @@ def migrate_users(connection: Connection) -> None:
         connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR"))
     if "subgroup" not in columns:
         connection.execute(text("ALTER TABLE users ADD COLUMN subgroup VARCHAR"))
+    if "last_action" not in columns:
+        connection.execute(text("ALTER TABLE users ADD COLUMN last_action VARCHAR"))
+    if "last_active_at" not in columns:
+        connection.execute(text("ALTER TABLE users ADD COLUMN last_active_at DATETIME"))
+
+
+def migrate_schedule_overrides_cancellation(connection: Connection) -> None:
+    columns = {column["name"] for column in inspect(connection).get_columns("schedule_overrides")}
+    if "is_cancelled" not in columns:
+        connection.execute(
+            text("ALTER TABLE schedule_overrides ADD COLUMN is_cancelled BOOLEAN DEFAULT 0")
+        )
+
+
+def migrate_admin_action_logs(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE TABLE IF NOT EXISTS admin_action_logs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "admin_id BIGINT NOT NULL, "
+        "action VARCHAR NOT NULL, "
+        "details TEXT NOT NULL DEFAULT '', "
+        "created_at DATETIME NOT NULL)"
+    ))
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_admin_action_logs_admin_id "
+        "ON admin_action_logs (admin_id)"
+    ))
+
+
+def migrate_dynamic_roles(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE TABLE IF NOT EXISTS dynamic_roles ("
+        "telegram_id BIGINT PRIMARY KEY, "
+        "role VARCHAR NOT NULL)"
+    ))
+
+
+def migrate_schedule_time_overrides(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE TABLE IF NOT EXISTS schedule_time_overrides ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "target_date DATE NOT NULL, "
+        "lesson_number INTEGER, "
+        "duration_minutes INTEGER NOT NULL, "
+        "big_break_minutes INTEGER, "
+        "created_at DATETIME NOT NULL)"
+    ))
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_schedule_time_overrides_target_date "
+        "ON schedule_time_overrides (target_date)"
+    ))

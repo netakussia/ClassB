@@ -12,9 +12,11 @@ __pycache__/
 
 /config/bot.yaml
 /config/roles.yaml
+!/config/students.yaml
 /data/
 *.db
 *.sqlite
 *.sqlite3
 *.tar.gz
+/logs/
 /root@*

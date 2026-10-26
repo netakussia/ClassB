@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
@@ -11,12 +13,15 @@ from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User as TelegramUser
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import MenuCallback, menu_back_keyboard
+from bot.utils.admin_audit import log_admin_action
+from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
 from bot.utils.schedule_parser import WEEKDAYS, Lesson, parse_schedule
+from bot.utils.time_utils import get_configured_week_parity, parse_day_month_date
 from config_loader import AppConfig
 from database.models import Absence, User
 
@@ -71,10 +76,16 @@ def _profile_values(telegram_user: TelegramUser | None) -> tuple[str | None, str
     return full_name, username
 
 
+SUBGROUP_NAMES = {"english": "Английская", "french": "Французская"}
+
+
 def _user_label(user: User) -> str:
-    full_name = user.full_name or "Пользователь"
-    username = f" (@{user.username})" if user.username else ""
-    return f"{full_name}{username} · ID {user.telegram_id}"
+    return user.full_name or "Пользователь"
+
+
+def _student_label(user: User) -> str:
+    subgroup = SUBGROUP_NAMES.get(user.subgroup)
+    return f"{_user_label(user)} ({subgroup} подгруппа)" if subgroup else _user_label(user)
 
 
 async def _get_or_create_user(
@@ -92,10 +103,7 @@ async def _get_or_create_user(
         )
         session.add(user)
         await session.commit()
-    elif telegram_user is not None and (
-        user.full_name != full_name or user.username != username
-    ):
-        user.full_name = full_name
+    elif telegram_user is not None and user.username != username:
         user.username = username
         await session.commit()
     return user
@@ -104,19 +112,19 @@ async def _get_or_create_user(
 def _date_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="Сегодня",
+        text=get_button_label("Сегодня", icon_key="today"),
         callback_data=DateChoiceCallback(action="date", choice="today").pack(),
     )
     keyboard.button(
-        text="Завтра",
+        text=get_button_label("Завтра", icon_key="tomorrow"),
         callback_data=DateChoiceCallback(action="date", choice="tomorrow").pack(),
     )
     keyboard.button(
-        text="Другая дата",
+        text=get_button_label("Другая дата", icon_key="date"),
         callback_data=DateChoiceCallback(action="date", choice="other").pack(),
     )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     keyboard.adjust(2, 1, 1)
@@ -129,23 +137,28 @@ def _lesson_keyboard(
 ) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="🌤 Весь день",
+        text=get_button_label("Весь день", icon_key="all_day"),
         callback_data=SimpleActionCallback(action="all").pack(),
+        style="success",
     )
     for number, lesson in enumerate(lessons, start=1):
-        mark = "✅ " if number in selected_lessons else ""
+        mark = f"{get_btn_emoji('check')} " if number in selected_lessons else ""
         keyboard.button(
-            text=f"{mark}{number}. {lesson.subject}",
+            text=get_button_label(
+                f"{mark}{number}. {lesson.subject}"
+            ),
             callback_data=LessonChoiceCallback(
                 action="lesson", lesson_number=number
             ).pack(),
+            style="success" if number in selected_lessons else "primary",
         )
     keyboard.button(
-        text="✅ Готово",
+        text=get_button_label("Готово", icon_key="success"),
         callback_data=SimpleActionCallback(action="done").pack(),
+        style="success",
     )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     keyboard.adjust(1)
@@ -160,7 +173,7 @@ def _lessons_label(lessons: object) -> str:
     numbers = sorted(
         int(item) for item in lessons if isinstance(item, int) or str(item).isdigit()
     )
-    return ", ".join(f"урок №{number}" for number in numbers) or "уроки не указаны"
+    return ", ".join(str(number) for number in numbers) + " пара" if numbers else "уроки не указаны"
 
 
 def _lessons_overlap(existing: object, requested: list[int] | list[str]) -> bool:
@@ -174,12 +187,16 @@ def _lessons_overlap(existing: object, requested: list[int] | list[str]) -> bool
     return bool(existing_numbers.intersection(int(item) for item in requested))
 
 
-def _schedule_for(target_date: date, config: AppConfig) -> list[Lesson]:
+async def _schedule_for(
+    target_date: date,
+    config: AppConfig,
+    session: AsyncSession,
+) -> list[Lesson]:
     weekday = target_date.weekday()
     if weekday >= len(WEEKDAYS):
         return []
     schedule = parse_schedule(config.schedule)
-    parity = schedule.get_parity(target_date)
+    parity = await get_configured_week_parity(session, target_date, config)
     return schedule.lessons_for(WEEKDAYS[weekday], parity)
 
 
@@ -188,10 +205,11 @@ async def _show_lesson_selection(
     state: FSMContext,
     target_date: date,
     config: AppConfig,
+    session: AsyncSession,
     replace_message: bool = False,
 ) -> None:
     try:
-        lessons = _schedule_for(target_date, config)
+        lessons = await _schedule_for(target_date, config, session)
     except ValueError:
         await state.clear()
         await message.answer("Расписание ещё не настроено. Обратитесь к администратору.")
@@ -286,21 +304,26 @@ async def _save_absence(
 
     if target_date == today:
         notification = (
-            "⚠️ Заявка на отсутствие сегодня\n"
-            f"Пользователь: {_user_label(user)}\n"
+            f"{get_emoji('warning')} Заявка на отсутствие (Сегодня)\n"
+            f"Студент: {html.escape(_student_label(user))}\n"
             f"Уроки: {_lessons_label(lessons)}"
         )
         for admin_id in _admin_ids(config):
             try:
-                await callback.bot.send_message(admin_id, notification)
+                await callback.bot.send_message(
+                    admin_id,
+                    notification,
+                    parse_mode=ParseMode.HTML,
+                )
             except TelegramAPIError:
                 continue
     await callback.answer()
     if callback.message is not None:
         await callback.message.edit_text(
-            f"✅ Заявка на отсутствие {target_date:%d.%m.%Y} сохранена: "
+            f"{get_emoji('success')} Заявка на отсутствие {target_date:%d.%m.%Y} сохранена: "
             f"{_lessons_label(lessons)}. Всё записано, можешь выдохнуть.",
             reply_markup=menu_back_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
 
 
@@ -330,8 +353,10 @@ async def start_absence_form(
 
     await state.set_state(AbsentForm.date_input)
     await message.answer(
-        "🙋 На какую дату тебя не будет? Выбирай, я всё запомню.",
+        f"{get_emoji('absence')} На какую дату тебя не будет? "
+        "Выбирай, я всё запомню.",
         reply_markup=_date_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -351,6 +376,7 @@ async def absent_date_choice_handler(
     callback_data: DateChoiceCallback,
     state: FSMContext,
     config: AppConfig,
+    session: AsyncSession,
 ) -> None:
     today = _local_today(config)
     if callback_data.choice == "other":
@@ -374,6 +400,7 @@ async def absent_date_choice_handler(
             state,
             target_date,
             config,
+            session,
             replace_message=True,
         )
 
@@ -383,24 +410,24 @@ async def absent_custom_date_handler(
     message: Message,
     state: FSMContext,
     config: AppConfig,
+    session: AsyncSession,
 ) -> None:
     value = (message.text or "").strip()
     today = _local_today(config)
-    try:
-        day_text, month_text = value.split(".")
-        if len(day_text) != 2 or len(month_text) != 2:
-            raise ValueError
-        target_date = date(today.year, int(month_text), int(day_text))
-        if target_date < today:
-            target_date = target_date.replace(year=today.year + 1)
-    except (ValueError, TypeError):
+    target_date = parse_day_month_date(value, today)
+    if target_date is None:
         await message.answer("Введите дату строго в формате ДД.ММ, например 05.10.")
         return
 
     if not today <= target_date <= today + timedelta(days=14):
         await message.answer("Можно выбрать дату от сегодня и не более чем на 14 дней вперёд.")
         return
-    await _show_lesson_selection(message, state, target_date, config)
+    await _show_lesson_selection(message, state, target_date, config, session)
+
+
+@router.message(AbsentForm.date_input)
+async def absent_date_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь дату текстом в формате ДД.ММ.")
 
 
 @router.callback_query(
@@ -412,6 +439,7 @@ async def absent_lesson_choice_handler(
     callback_data: LessonChoiceCallback,
     state: FSMContext,
     config: AppConfig,
+    session: AsyncSession,
 ) -> None:
     form_data = await state.get_data()
     lesson_count = form_data.get("lesson_count")
@@ -440,7 +468,7 @@ async def absent_lesson_choice_handler(
             return
         try:
             target_date = date.fromisoformat(target_date_value)
-            lessons = _schedule_for(target_date, config)
+            lessons = await _schedule_for(target_date, config, session)
         except ValueError:
             await state.clear()
             await callback.answer("Расписание недоступно. Начните заново.", show_alert=True)
@@ -522,13 +550,14 @@ async def show_my_absences(
         if absence.target_date >= today:
             builder = InlineKeyboardBuilder()
             builder.button(
-                text="✋ Отменить",
+                text=get_button_label("Отменить", icon_key="cancel"),
                 callback_data=RecordActionCallback(
                     action="cancel", absence_id=absence.id
                 ).pack(),
+                style="danger",
             )
             builder.button(
-                text="🏠 В меню",
+                text=get_button_label("В меню", icon_key="back_arrow"),
                 callback_data=MenuCallback(action="home").pack(),
             )
             builder.adjust(2)
@@ -613,26 +642,39 @@ async def show_class_absences(
             )
         )
     }
-    lines = ["📋 АКТИВНЫЕ ЗАЯВКИ"]
+    lines: list[str] = []
     current_date: date | None = None
     keyboard = InlineKeyboardBuilder()
     for absence in absences:
         if absence.target_date != current_date:
             current_date = absence.target_date
-            lines.append(f"\n📅 {current_date:%d.%m.%Y}")
+            if lines:
+                lines.append("")
+            lines.append(
+                f"{get_emoji('cases')} Отсутствия на {current_date:%d.%m.%Y}:"
+            )
         user = users.get(absence.telegram_id)
-        label = _user_label(user) if user is not None else f"Пользователь · ID {absence.telegram_id}"
-        lines.append(f"• {label}\n  {_lessons_label(absence.lessons)} · заявка #{absence.id}")
+        label = _user_label(user) if user is not None else "Студент не найден"
+        lines.append(
+            f"• {html.escape(label)} — {_lessons_label(absence.lessons)}"
+        )
         keyboard.button(
-            text=f"Отметить как ложную #{absence.id}",
+            text=get_button_label(
+                f"Отметить как ложную #{absence.id}",
+                icon_key="warning",
+            ),
             callback_data=RecordActionCallback(action="flag", absence_id=absence.id).pack(),
         )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     keyboard.adjust(1)
-    await message.answer("\n".join(lines), reply_markup=keyboard.as_markup())
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=keyboard.as_markup(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @router.message(Command("absences"))
@@ -672,6 +714,13 @@ async def flag_absence_handler(
             days=config.sanctions.ban_days
         )
         ban_text = " Пользователь заблокирован до ручного снятия ограничения."
+    await log_admin_action(
+        session,
+        callback.from_user.id,
+        "Выдал бан" if ban_text else "Отметил ложную заявку",
+        f"ложная заявка #{absence.id}, пользователь={user.telegram_id}, "
+        f"ложных заявок={user.false_absences_count}",
+    )
     await session.commit()
     await callback.answer("Заявка отмечена как ложная.")
     if callback.message is not None:
@@ -707,6 +756,13 @@ async def unban_absent_handler(
         return
     user.false_absences_count = 0
     user.banned_until = None
+    if message.from_user is not None:
+        await log_admin_action(
+            session,
+            message.from_user.id,
+            "Снял санкцию",
+            f"telegram_id={telegram_id}",
+        )
     await session.commit()
     await message.answer(
         f"Ограничение для пользователя {_user_label(user)} снято.",
@@ -732,27 +788,42 @@ async def show_absence_restrictions(
     )
     if not users:
         await message.answer(
-            "🔓 Ограничений сейчас нет. Все держатся молодцом.",
+            f"{get_emoji('restriction')} Ограничений сейчас нет. "
+            "Все держатся молодцом.",
             reply_markup=menu_back_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    lines = ["🔓 Кому можно вернуть возможность отмечать отсутствие:"]
+    lines = [
+        f"{get_emoji('restriction')} Кому можно вернуть возможность отмечать отсутствие:"
+    ]
     keyboard = InlineKeyboardBuilder()
     for user in users:
-        lines.append(f"• {_user_label(user)}\n  Ложных заявок — {user.false_absences_count}")
+        lines.append(
+            f"• {html.escape(_user_label(user))}\n"
+            f"  Ложных заявок — {user.false_absences_count}"
+        )
         keyboard.button(
-            text=f"🔓 Снять ограничение: {user.telegram_id}",
+            text=get_button_label(
+                f"Снять ограничение: {user.telegram_id}",
+                icon_key="success",
+            ),
             callback_data=UserActionCallback(
                 action="unban", telegram_id=user.telegram_id
             ).pack(),
+            style="success",
         )
     keyboard.button(
-        text="🏠 В меню",
+        text=get_button_label("В меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
     )
     keyboard.adjust(1)
-    await message.answer("\n".join(lines), reply_markup=keyboard.as_markup())
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=keyboard.as_markup(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @router.callback_query(UserActionCallback.filter(F.action == "unban"))
@@ -771,12 +842,20 @@ async def unban_absent_choice_handler(
         return
     user.false_absences_count = 0
     user.banned_until = None
+    await log_admin_action(
+        session,
+        callback.from_user.id,
+        "Снял санкцию",
+        f"telegram_id={callback_data.telegram_id}",
+    )
     await session.commit()
     await callback.answer("Ограничение снято.")
     if callback.message is not None:
         await callback.message.edit_text(
-            f"✅ Ограничение для пользователя {_user_label(user)} снято.",
+            f"{get_emoji('success')} Ограничение для пользователя "
+            f"{html.escape(_user_label(user))} снято.",
             reply_markup=menu_back_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
 
 

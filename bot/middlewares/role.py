@@ -5,8 +5,10 @@ from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config_loader import AppConfig
+from database.models import DynamicRole
 
 
 class RoleMiddleware(BaseMiddleware):
@@ -21,6 +23,9 @@ class RoleMiddleware(BaseMiddleware):
         config = data.get("config")
         if not isinstance(config, AppConfig):
             raise RuntimeError("AppConfig was not provided in dispatcher workflow data")
+        session = data.get("session")
+        if not isinstance(session, AsyncSession):
+            raise RuntimeError("AsyncSession was not provided in dispatcher workflow data")
 
         user = getattr(event, "from_user", None)
         telegram_id = getattr(user, "id", None)
@@ -33,7 +38,11 @@ class RoleMiddleware(BaseMiddleware):
         elif telegram_id in roles.moderators:
             role = "moderator"
         else:
-            role = "user"
+            dynamic_role = await session.get(DynamicRole, telegram_id) if isinstance(telegram_id, int) else None
+            role = dynamic_role.role if dynamic_role and dynamic_role.role in {
+                "starosta",
+                "moderator",
+            } else "user"
 
         data["role"] = role
         return await handler(event, data)

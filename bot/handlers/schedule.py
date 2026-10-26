@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User as TelegramUser
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import menu_back_keyboard
+from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
 from bot.utils.schedule_parser import WEEKDAYS, Lesson, parse_schedule
-from bot.utils.time_utils import get_next_school_day
+from bot.utils.time_utils import (
+    calculate_lesson_times,
+    get_configured_week_parity,
+    get_next_school_day,
+)
 from config_loader import AppConfig
-from database.models import ScheduleOverride, User
+from database.models import ScheduleOverride, ScheduleTimeOverride, User
 
 
 router = Router(name="schedule")
@@ -33,24 +40,6 @@ SUBGROUP_NAMES = {"english": "Английская", "french": "Французс
 
 class ScheduleActionCallback(CallbackData, prefix="schedule"):
     action: str
-
-
-class SubgroupCallback(CallbackData, prefix="subgroup"):
-    subgroup: str
-
-
-def _subgroup_keyboard() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(
-        text="🇬🇧 Английская подгруппа",
-        callback_data=SubgroupCallback(subgroup="english").pack(),
-    )
-    keyboard.button(
-        text="🇫🇷 Французская подгруппа",
-        callback_data=SubgroupCallback(subgroup="french").pack(),
-    )
-    keyboard.adjust(1)
-    return keyboard.as_markup()
 
 
 async def _get_or_create_user(
@@ -79,10 +68,14 @@ async def show_my_group(
         return
     user = await _get_or_create_user(session, telegram_user)
     await session.commit()
-    group = SUBGROUP_NAMES.get(user.subgroup, "не выбрана")
+    group = SUBGROUP_NAMES.get(user.subgroup, "не указана")
+    icon_key = "english" if user.subgroup == "english" else "french" if user.subgroup == "french" else "users"
+    name = user.full_name or telegram_user.full_name
     await message.answer(
-        f"Текущая подгруппа: {group}.\nВыберите свою подгруппу:",
-        reply_markup=_subgroup_keyboard(),
+        f"Студент: {html.escape(name)} | Подгруппа: "
+        f"{get_emoji(icon_key)} {html.escape(group)} (из базы группы)",
+        reply_markup=menu_back_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -128,7 +121,10 @@ def _weekend_easter_egg(now: datetime) -> bool:
 def _weekend_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
-        text="📅 Всё равно показать Понедельник",
+        text=get_button_label(
+            "Всё равно показать Понедельник",
+            icon_key="schedule",
+        ),
         callback_data=ScheduleActionCallback(action="monday").pack(),
     )
     return keyboard.as_markup()
@@ -154,24 +150,50 @@ def _lesson_card(
     lesson_number: int,
     lesson: Lesson,
     override: ScheduleOverride | None,
+    *,
+    display_time: str | None = None,
+    shortened: bool = False,
 ) -> str:
     subject = lesson.subject
     room = lesson.room
     teacher = lesson.teacher
     note = ""
+    lesson_label = (
+        f"{lesson_number}."
+        if display_time is not None
+        else _lesson_number_label(lesson_number)
+    )
+    separator = " | " if display_time is not None else "  ·  "
+
+    if override is not None and override.is_cancelled:
+        cancelled_subject = lesson.subject if lesson.subject != "—" else (override.new_subject or "Пара")
+        return (
+            f"{lesson_label} {html.escape(display_time or lesson.time)}{separator}"
+            f"<s>{html.escape(cancelled_subject)}</s>\n"
+            f"   {get_emoji('cancel_lesson')} Урок отменён"
+        )
 
     if override is not None and override.override_type == "room":
         room = override.new_room or "не указан"
-        note = f"\n   🔁 Кабинет изменён · был {lesson.room}"
+        note = (
+            f"\n   {get_emoji('replacement')} Кабинет изменён · был "
+            f"{html.escape(lesson.room)}"
+        )
     elif override is not None and override.override_type == "lesson":
         subject = override.new_subject or "предмет не указан"
         room = override.new_room or "не указан"
         teacher = override.new_teacher or lesson.teacher
-        note = f"\n   🔁 Вместо: {lesson.subject}"
+        note = (
+            f"\n   {get_emoji('replacement')} Вместо: "
+            f"{html.escape(lesson.subject)}"
+        )
 
     return (
-        f"{_lesson_number_label(lesson_number)} {lesson.time}  ·  {subject}\n"
-        f"   👤 {teacher}   •   🚪 {room}{note}"
+        f"{lesson_label} {html.escape(display_time or lesson.time)}"
+        f"{separator}{html.escape(subject)}"
+        f"{' (сокращённый)' if shortened else ''}\n"
+        f"   {get_emoji('user')} {html.escape(teacher)}   •   "
+        f"{get_emoji('room')} {html.escape(room)}{note}"
     )
 
 
@@ -188,8 +210,10 @@ async def show_next_schedule(
     now = datetime.now(ZoneInfo(config.bot.timezone))
     if target_date is None and _weekend_easter_egg(now):
         await message.answer(
-            "Какое расписание, выдохни, выходные! 🥳 Пора отдыхать.",
+            f"Какое расписание, выдохни, выходные! "
+            f"{get_emoji('celebration')} Пора отдыхать.",
             reply_markup=_weekend_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
         return
     target_date = target_date or get_next_school_day(config.bot.timezone)
@@ -202,11 +226,20 @@ async def show_next_schedule(
     subgroup = user.subgroup if user is not None else None
     name = display_name or (user.full_name.split()[0] if user and user.full_name else "друг")
     if 5 <= now.hour < 12:
-        greeting = f"Доброе утро, {name}! ☀️ Вот расписание на сегодня:"
+        greeting = (
+            f"Доброе утро, {html.escape(name)}! {get_emoji('morning')} "
+            "Вот расписание на сегодня:"
+        )
     elif 12 <= now.hour < 18:
-        greeting = f"Добрый день, {name}! 📚 Вот расписание:"
+        greeting = (
+            f"Добрый день, {html.escape(name)}! {get_emoji('homework')} "
+            "Вот расписание:"
+        )
     else:
-        greeting = f"Добрый вечер, {name}! 🌙 Вот расписание на завтра:"
+        greeting = (
+            f"Добрый вечер, {html.escape(name)}! {get_emoji('evening')} "
+            "Вот расписание на завтра:"
+        )
 
     try:
         schedule = parse_schedule(config.schedule)
@@ -217,7 +250,7 @@ async def show_next_schedule(
         )
         return
 
-    parity = schedule.get_parity(target_date)
+    parity = await get_configured_week_parity(session, target_date, config)
     weekday = WEEKDAYS[target_date.weekday()] if target_date.weekday() < 5 else (
         "saturday" if target_date.weekday() == 5 else "sunday"
     )
@@ -229,31 +262,78 @@ async def show_next_schedule(
         .order_by(ScheduleOverride.lesson_number, ScheduleOverride.id)
     )
     overrides = {override.lesson_number: override for override in result}
+    time_overrides = list(
+        await session.scalars(
+            select(ScheduleTimeOverride)
+            .where(ScheduleTimeOverride.target_date == target_date)
+            .order_by(ScheduleTimeOverride.id)
+        )
+    )
+    lesson_clocks = (
+        calculate_lesson_times(
+            (lesson.time for lesson in lessons),
+            config.schedule.lesson_duration_minutes,
+            time_overrides,
+        )
+        if time_overrides
+        else []
+    )
 
     lines = [
         greeting,
-        "🗓 РАСПИСАНИЕ",
+        f"{get_emoji('date')} РАСПИСАНИЕ",
         f"{WEEKDAY_NAMES[weekday]}, {target_date:%d.%m} · {parity} неделя",
-        "━━━━━━━━━━━━━━━━",
     ]
-    last_lesson_number = max(len(lessons), max(overrides, default=0))
-    schedule_rows = _personalized_lessons(lessons, subgroup)
-    rendered_count = 0
-    for lesson_number, lesson in schedule_rows:
-        rendered_count += 1
+    if time_overrides:
+        lines.append(f"{get_emoji('warning')} Внимание! В этот день уроки сокращены!")
+    lines.append("━━━━━━━━━━━━━━━━")
+    schedule_rows = dict(_personalized_lessons(lessons, subgroup))
+    placeholder = Lesson(time="—", subject="—", room="—", teacher="—")
+    for lesson_number, override in overrides.items():
+        if override.is_cancelled:
+            schedule_rows[lesson_number] = (
+                lessons[lesson_number - 1]
+                if lesson_number <= len(lessons)
+                else placeholder
+            )
+        elif lesson_number > len(lessons):
+            schedule_rows[lesson_number] = placeholder
+    for lesson_number, lesson in sorted(schedule_rows.items()):
+        clock = (
+            lesson_clocks[lesson_number - 1]
+            if lesson_clocks and lesson_number <= len(lesson_clocks)
+            else None
+        )
+        display_time = (
+            f"{clock.start}–{clock.end}"
+            if clock is not None
+            else lesson.time if lesson is not None else None
+        )
         if lesson is None:
-            lines.append(f"• [{lessons[lesson_number - 1].time}] Свободное окно ☕ (у параллельной подгруппы пара)")
+            free_time = display_time or lessons[lesson_number - 1].time
+            lines.append(
+                f"• [{free_time}] Свободное окно {get_emoji('free_slot')} "
+                "(у параллельной подгруппы пара)"
+            )
         else:
-            lines.append(_lesson_card(rendered_count, lesson, overrides.get(lesson_number)))
-    for lesson_number in range(len(lessons) + 1, last_lesson_number + 1):
-        rendered_count += 1
-        placeholder = Lesson(time="—", subject="—", room="—", teacher="—")
-        lines.append(_lesson_card(rendered_count, placeholder, overrides.get(lesson_number)))
+            lines.append(
+                _lesson_card(
+                    lesson_number,
+                    lesson,
+                    overrides.get(lesson_number),
+                    display_time=display_time,
+                    shortened=clock.shortened if clock is not None else False,
+                )
+            )
 
-    if rendered_count == 0:
+    if not schedule_rows:
         lines.append("На этот день уроков нет.")
 
-    await message.answer("\n\n".join(lines), reply_markup=menu_back_keyboard())
+    await message.answer(
+        "\n\n".join(lines),
+        reply_markup=menu_back_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("schedule", "расписание"))
@@ -274,25 +354,6 @@ async def schedule_handler(
 @router.message(Command("my_group"))
 async def my_group_handler(message: Message, session: AsyncSession) -> None:
     await show_my_group(message, session)
-
-
-@router.callback_query(SubgroupCallback.filter())
-async def subgroup_callback_handler(
-    callback: CallbackQuery,
-    callback_data: SubgroupCallback,
-    session: AsyncSession,
-) -> None:
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await _get_or_create_user(session, callback.from_user)
-    user.subgroup = callback_data.subgroup
-    await session.commit()
-    await callback.answer("Подгруппа сохранена.")
-    await callback.message.edit_text(
-        f"Текущая подгруппа: {SUBGROUP_NAMES[callback_data.subgroup]}.",
-        reply_markup=menu_back_keyboard(),
-    )
 
 
 @router.callback_query(ScheduleActionCallback.filter())

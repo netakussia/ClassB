@@ -1,11 +1,25 @@
+import html
+
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.handlers.admin import start_homework_add
+from bot.keyboards.inline import InlineKeyboardBuilder
+
+from bot.handlers.admin import (
+    admin_broadcast_start_handler,
+    show_admin_action_history,
+    show_admin_management,
+    show_user_activity,
+    start_schedule_time_override,
+    start_homework_add,
+    start_student_add,
+)
+from bot.handlers.docs import show_document_categories, start_document_add
+from bot.handlers.events import start_event_add
 from bot.handlers.absent import (
     show_absence_restrictions,
     show_class_absences,
@@ -18,13 +32,16 @@ from bot.handlers.replacements import start_replacement_form
 from bot.handlers.schedule import show_my_group, show_next_schedule
 from bot.ui import (
     ADMIN_ROLES,
+    CancelCallback,
     MenuCallback,
     admin_menu_keyboard,
     main_menu_keyboard,
     menu_back_keyboard,
     remove_inline_screen,
 )
+from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
 from config_loader import AppConfig
+from database.models import User
 
 
 router = Router(name="base")
@@ -39,9 +56,13 @@ ROLE_NAMES = {
 
 
 def _main_menu_text(role: str) -> str:
-    admin_hint = "\n\n🛠 Доступна админ-панель." if role in ADMIN_ROLES else ""
+    admin_hint = (
+        f"\n\n{get_emoji('admin')} Доступна админ-панель."
+        if role in ADMIN_ROLES
+        else ""
+    )
     return (
-        "🎛 КЛАССНЫЙ ПУЛЬТ\n"
+        f"{get_emoji('control')} КЛАССНЫЙ ПУЛЬТ\n"
         "ДЗ, расписание и заявки — всё рядом."
         f"{admin_hint}"
     )
@@ -54,47 +75,116 @@ def _help_text(role: str) -> str:
         else ""
     )
     return (
-        "🧭 ЧТО ГДЕ ЛЕЖИТ\n\n"
+        f"{get_emoji('help')} ЧТО ГДЕ ЛЕЖИТ\n\n"
         "• Домашнее задание — ДЗ на ближайший учебный день и поиск по предмету.\n"
         "• Расписание — ближайший учебный день с учётом замен.\n"
         "• Меня не будет — создай заявку на отсутствие.\n"
         "• Мои заявки — посмотреть или отменить свою отметку."
         f"{admin_hint}\n\n"
+        f"{get_emoji('admin')} Написать модератору или "
+        f"{get_emoji('owner')} владельцу можно кнопками ниже.\n\n"
         "Выбери нужный раздел в меню.\n\n"
         "Кстати, мой отдельный проект для знакомств (16+) — по кнопке ниже."
     )
 
 
-def _help_keyboard() -> InlineKeyboardMarkup:
+def _help_keyboard(config: AppConfig) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
+    moderator_ids = sorted(
+        set(config.roles.starosta) | set(config.roles.moderators)
+    )
+    for telegram_id in moderator_ids:
+        keyboard.button(
+            text=get_button_label("Написать модератору", icon_key="admin"),
+            url=f"tg://user?id={telegram_id}",
+        )
+    for telegram_id in sorted(set(config.roles.owner)):
+        keyboard.button(
+            text=get_button_label("Написать владельцу", icon_key="owner"),
+            url=f"tg://user?id={telegram_id}",
+        )
     keyboard.button(
-        text="💬 MeAnima · знакомства (16+)",
+        text=get_button_label("MeAnima · знакомства (16+)", icon_key="chat"),
         url="https://t.me/MeAnima_Bot",
     )
-    keyboard.button(text="🏠 В меню", callback_data=MenuCallback(action="home").pack())
+    keyboard.button(
+        text=get_button_label("В меню", icon_key="back_arrow"),
+        callback_data=MenuCallback(action="home").pack(),
+    )
     keyboard.adjust(1)
     return keyboard.as_markup()
 
 
-async def show_main_menu(message: Message, role: str) -> None:
-    await message.answer(
-        _main_menu_text(role),
-        reply_markup=main_menu_keyboard(role),
+async def show_main_menu(
+    message: Message,
+    role: str,
+    user: User | None = None,
+    display_name: str | None = None,
+) -> None:
+    full_name = user.full_name if user and user.full_name else display_name or "студент"
+    subgroup_names = {"english": "Английская", "french": "Французская"}
+    subgroup = subgroup_names.get(user.subgroup if user else None, "не указана")
+    subgroup_emoji = (
+        "english" if user and user.subgroup == "english"
+        else "french" if user and user.subgroup == "french"
+        else "users"
     )
-    await message.answer("Меню разделов доступно на клавиатуре ниже.", reply_markup=main_reply_keyboard())
+    await message.answer(
+        f"{get_emoji('greeting')} Привет, <b>" + html.escape(full_name) + "</b>!\n"
+        "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
+        f"Твоя подгруппа: <i>{get_emoji(subgroup_emoji)} "
+        f"{html.escape(subgroup)}</i>.\n\n"
+        f"Выбери нужное действие в меню ниже {get_emoji('down')}"
+        + (
+            f"\n\n{get_emoji('admin')} Доступна админ-панель."
+            if role in ADMIN_ROLES
+            else ""
+        ),
+        reply_markup=main_menu_keyboard(role),
+        parse_mode=ParseMode.HTML,
+    )
+    await message.answer("Меню разделов доступно на клавиатуре ниже.", reply_markup=main_reply_keyboard(role))
 
 
 @router.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext, role: str) -> None:
+async def start_handler(message: Message, state: FSMContext, role: str, session: AsyncSession) -> None:
     await state.clear()
-    await show_main_menu(message, role)
+    user = await session.get(User, message.from_user.id) if message.from_user else None
+    await show_main_menu(message, role, user, message.from_user.full_name if message.from_user else None)
+
+
+@router.message(Command("admin"))
+async def admin_hub_handler(message: Message, role: str) -> None:
+    if role not in ADMIN_ROLES:
+        await message.answer("Эта панель только для администраторов.")
+        return
+    await message.answer(
+        f"{get_emoji('admin')} <b>АДМИН-ХАБ</b>\nВыбери действие.",
+        reply_markup=admin_menu_keyboard(role),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.callback_query(CancelCallback.filter())
+async def cancel_form_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer("Действие отменено.")
+    if callback.message is None:
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer("Действие отменено.", reply_markup=menu_back_keyboard())
 
 
 @router.message(Command("whoami"))
 async def whoami_handler(message: Message, role: str) -> None:
     await message.answer(
-        f"👤 Ты здесь как: {ROLE_NAMES.get(role, role)}.",
+        f"{get_emoji('user')} Ты здесь как: "
+        f"{html.escape(ROLE_NAMES.get(role, role))}.",
         reply_markup=menu_back_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -113,12 +203,21 @@ async def chat_id_handler(message: Message) -> None:
 
 
 @router.message(Command("help"))
-async def help_handler(message: Message, role: str) -> None:
-    await message.answer(_help_text(role), reply_markup=main_reply_keyboard())
-    await message.answer("Полезная ссылка:", reply_markup=_help_keyboard())
+async def help_handler(message: Message, role: str, config: AppConfig) -> None:
+    await message.answer(
+        _help_text(role),
+        reply_markup=main_reply_keyboard(role),
+        parse_mode=ParseMode.HTML,
+    )
+    await message.answer("Связь и полезные ссылки:", reply_markup=_help_keyboard(config))
 
 
-@router.message(F.text == "📅 Расписание")
+@router.message(F.text == f"{get_btn_emoji('settings')} Админка")
+async def reply_admin_hub_handler(message: Message, role: str) -> None:
+    await admin_hub_handler(message, role)
+
+
+@router.message(F.text == f"{get_btn_emoji('schedule')} Расписание")
 async def reply_schedule_handler(
     message: Message,
     state: FSMContext,
@@ -129,12 +228,12 @@ async def reply_schedule_handler(
     await show_next_schedule(message, config, session)
 
 
-@router.message(F.text == "👥 Моя подгруппа")
+@router.message(F.text == f"{get_btn_emoji('users')} Моя подгруппа")
 async def reply_my_group_handler(message: Message, session: AsyncSession) -> None:
     await show_my_group(message, session)
 
 
-@router.message(F.text == "📚 ДЗ")
+@router.message(F.text == f"{get_btn_emoji('homework')} ДЗ")
 async def reply_homework_handler(
     message: Message,
     state: FSMContext,
@@ -145,7 +244,7 @@ async def reply_homework_handler(
     await show_tomorrow_homework(message, config, session)
 
 
-@router.message(F.text == "🙋 Мои отсутствия")
+@router.message(F.text == f"{get_btn_emoji('absence')} Мои отсутствия")
 async def reply_my_absences_handler(
     message: Message,
     state: FSMContext,
@@ -181,9 +280,23 @@ async def menu_callback_handler(
     if action == "home":
         await state.clear()
         await callback.answer()
+        user = await session.get(User, callback.from_user.id)
+        full_name = user.full_name if user and user.full_name else callback.from_user.full_name
+        subgroup_names = {"english": "Английская", "french": "Французская"}
+        subgroup = subgroup_names.get(user.subgroup if user else None, "не указана")
+        subgroup_emoji = (
+            "english" if user and user.subgroup == "english"
+            else "french" if user and user.subgroup == "french"
+            else "users"
+        )
         await callback.message.edit_text(
-            _main_menu_text(role),
+            f"{get_emoji('greeting')} Привет, <b>" + html.escape(full_name) + "</b>!\n"
+            "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
+            f"Твоя подгруппа: <i>{get_emoji(subgroup_emoji)} "
+            f"{html.escape(subgroup)}</i>.\n\n"
+            f"Выбери нужное действие в меню ниже {get_emoji('down')}",
             reply_markup=main_menu_keyboard(role),
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -192,14 +305,20 @@ async def menu_callback_handler(
 
     if action == "help":
         await callback.answer()
-        await callback.message.edit_text(_help_text(role), reply_markup=_help_keyboard())
+        await callback.message.edit_text(
+            _help_text(role),
+            reply_markup=_help_keyboard(config),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if action == "profile":
         await callback.answer()
         await callback.message.edit_text(
-            f"👤 Ты здесь как: {ROLE_NAMES.get(role, role)}.",
+            f"{get_emoji('user')} Ты здесь как: "
+            f"{html.escape(ROLE_NAMES.get(role, role))}.",
             reply_markup=menu_back_keyboard(),
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -214,19 +333,25 @@ async def menu_callback_handler(
             return
         await callback.answer()
         await callback.message.edit_text(
-            "🛠 АДМИН-ПАНЕЛЬ\nВыбери действие.",
-            reply_markup=admin_menu_keyboard(),
+            f"{get_emoji('admin')} АДМИН-ПАНЕЛЬ\nВыбери действие.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_menu_keyboard(role),
         )
         return
 
-    if action in {"add_homework", "replace", "class_absences", "restrictions"} and role not in ADMIN_ROLES:
+    if action in {"add_homework", "replace", "broadcast", "admin_history", "add_document", "add_event", "add_student", "class_absences", "restrictions", "activity", "schedule_time_overrides"} and role not in ADMIN_ROLES:
         await callback.answer("Эта кнопка только для админов.", show_alert=True)
+        return
+    if action == "admin_management" and role != "owner":
+        await callback.answer("Управлять ролями может только владелец.", show_alert=True)
         return
 
     await callback.answer()
     await remove_inline_screen(callback)
     if action == "homework":
         await show_tomorrow_homework(callback.message, config, session)
+    elif action == "documents":
+        await show_document_categories(callback.message)
     elif action == "schedule":
         await show_next_schedule(
             callback.message,
@@ -253,12 +378,28 @@ async def menu_callback_handler(
             telegram_user=callback.from_user,
         )
     elif action == "add_homework":
-        await start_homework_add(callback.message, state, role, config)
+        await start_homework_add(callback.message, state, role, config, session)
     elif action == "replace":
         await start_replacement_form(callback.message, state, role)
+    elif action == "broadcast":
+        await admin_broadcast_start_handler(callback.message, state, role)
+    elif action == "schedule_time_overrides":
+        await start_schedule_time_override(callback.message, state, role)
+    elif action == "admin_history":
+        await show_admin_action_history(callback.message, session, page=0)
+    elif action == "admin_management":
+        await show_admin_management(callback.message, session, config, role)
+    elif action == "add_document":
+        await start_document_add(callback.message, state, role)
+    elif action == "add_event":
+        await start_event_add(callback.message, state, role)
+    elif action == "add_student":
+        await start_student_add(callback.message, state, role)
     elif action == "class_absences":
         await show_class_absences(callback.message, role, session, config)
     elif action == "restrictions":
         await show_absence_restrictions(callback.message, role, session, config)
+    elif action == "activity":
+        await show_user_activity(callback.message, session, config)
     else:
         await callback.message.answer("Такой раздел пока не найден.", reply_markup=menu_back_keyboard())

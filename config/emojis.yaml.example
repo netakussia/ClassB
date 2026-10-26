@@ -1,0 +1,210 @@
+schedule:
+  unicode: "📅"
+  custom_id: null
+homework:
+  unicode: "📚"
+  custom_id: "5368324170671202286"
+settings:
+  unicode: "⚙️"
+  custom_id: null
+control:
+  unicode: "🎛️"
+  custom_id: null
+replacement:
+  unicode: "🔄"
+  custom_id: null
+cancel:
+  unicode: "❌"
+  custom_id: null
+success:
+  unicode: "✅"
+  custom_id: null
+admin:
+  unicode: "🛠️"
+  custom_id: null
+logs:
+  unicode: "📜"
+  custom_id: null
+shortened:
+  unicode: "⏰"
+  custom_id: null
+event:
+  unicode: "📅"
+  custom_id: null
+documents:
+  unicode: "📂"
+  custom_id: null
+folder:
+  unicode: "📁"
+  custom_id: null
+timer:
+  unicode: "⏱️"
+  custom_id: null
+laboratory:
+  unicode: "📁"
+  custom_id: null
+manual:
+  unicode: "📚"
+  custom_id: null
+template:
+  unicode: "📝"
+  custom_id: null
+cloud:
+  unicode: "☁️"
+  custom_id: null
+absence:
+  unicode: "🙋"
+  custom_id: null
+user:
+  unicode: "👤"
+  custom_id: null
+users:
+  unicode: "👥"
+  custom_id: null
+cases:
+  unicode: "📋"
+  custom_id: null
+add:
+  unicode: "➕"
+  custom_id: null
+edit:
+  unicode: "✏️"
+  custom_id: null
+confirm:
+  unicode: "✅"
+  custom_id: null
+decline:
+  unicode: "✋"
+  custom_id: null
+back:
+  unicode: "🏠"
+  custom_id: null
+back_arrow:
+  unicode: "⬅️"
+  custom_id: null
+back_categories:
+  unicode: "🔙"
+  custom_id: null
+forward:
+  unicode: "➡️"
+  custom_id: null
+down:
+  unicode: "👇"
+  custom_id: null
+forbidden:
+  unicode: "⛔"
+  custom_id: null
+search:
+  unicode: "🔎"
+  custom_id: null
+attachment:
+  unicode: "📎"
+  custom_id: null
+date:
+  unicode: "📅"
+  custom_id: null
+time:
+  unicode: "🕒"
+  custom_id: null
+deadline:
+  unicode: "⏳"
+  custom_id: null
+today:
+  unicode: "📍"
+  custom_id: null
+this_week:
+  unicode: "📌"
+  custom_id: null
+month:
+  unicode: "📅"
+  custom_id: null
+tomorrow:
+  unicode: "📅"
+  custom_id: null
+other_date:
+  unicode: "✍️"
+  custom_id: null
+room:
+  unicode: "🚪"
+  custom_id: null
+cancel_lesson:
+  unicode: "❌"
+  custom_id: null
+warning:
+  unicode: "⚠️"
+  custom_id: null
+all_day:
+  unicode: "☀️"
+  custom_id: null
+reminder:
+  unicode: "🔔"
+  custom_id: null
+activity:
+  unicode: "📜"
+  custom_id: null
+history:
+  unicode: "📜"
+  custom_id: null
+restriction:
+  unicode: "🔓"
+  custom_id: null
+free_slot:
+  unicode: "☕"
+  custom_id: null
+celebration:
+  unicode: "🥳"
+  custom_id: null
+morning:
+  unicode: "☀️"
+  custom_id: null
+evening:
+  unicode: "🌙"
+  custom_id: null
+help:
+  unicode: "🧭"
+  custom_id: null
+chat:
+  unicode: "💬"
+  custom_id: null
+greeting:
+  unicode: "👋"
+  custom_id: null
+notice:
+  unicode: "📢"
+  custom_id: null
+light:
+  unicode: "💡"
+  custom_id: null
+goal:
+  unicode: "🎯"
+  custom_id: null
+later:
+  unicode: "🔮"
+  custom_id: null
+trash:
+  unicode: "🗑️"
+  custom_id: null
+english:
+  unicode: "🇬🇧"
+  custom_id: null
+french:
+  unicode: "🇫🇷"
+  custom_id: null
+bullet_empty:
+  unicode: "▫️"
+  custom_id: null
+star:
+  unicode: "⭐"
+  custom_id: null
+check:
+  unicode: "✅"
+  custom_id: null
+save:
+  unicode: "💾"
+  custom_id: null
+send:
+  unicode: "🚀"
+  custom_id: null
+view:
+  unicode: "📊"
+  custom_id: null

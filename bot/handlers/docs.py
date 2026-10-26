@@ -1,30 +1,47 @@
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.reply import main_reply_keyboard
-from bot.ui import ADMIN_ROLES, menu_back_keyboard
+from bot.keyboards.inline import InlineKeyboardBuilder
+from bot.ui import (
+    ADMIN_ROLES,
+    DOCUMENT_CATEGORIES,
+    DocumentCallback,
+    MenuCallback,
+    add_cancel_button,
+    document_categories_keyboard,
+)
+from bot.utils.admin_audit import log_admin_action
+from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
 from database.models import ClassDocument
 
 
 router = Router(name="documents")
 
-CATEGORIES = {
-    "cloud": "📁 Облачный диск",
-    "labs": "🧪 Лабораторные",
-    "manuals": "📚 Методички",
-    "templates": "📝 Шаблоны отчётов",
+CATEGORIES = DOCUMENT_CATEGORIES
+CATEGORY_NAMES = {
+    "labs": "Лабораторные",
+    "manuals": "Методички",
+    "templates": "Шаблоны",
+    "cloud": "Облако",
+}
+CATEGORY_EMOJI = {
+    "labs": "laboratory",
+    "manuals": "manual",
+    "templates": "template",
+    "cloud": "cloud",
 }
 
 
@@ -32,11 +49,6 @@ class DocumentForm(StatesGroup):
     category = State()
     title = State()
     content = State()
-
-
-class DocumentCallback(CallbackData, prefix="docs"):
-    action: str
-    value: str
 
 
 def _normalize_http_url(value: str) -> str | None:
@@ -60,25 +72,23 @@ def _normalize_http_url(value: str) -> str | None:
 
 
 def _categories_keyboard(action: str) -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardBuilder()
-    for category, label in CATEGORIES.items():
-        keyboard.button(
-            text=label,
-            callback_data=DocumentCallback(action=action, value=category).pack(),
-        )
-    keyboard.adjust(1)
-    return keyboard.as_markup()
+    return document_categories_keyboard(action)
+
+
+def _add_categories_keyboard() -> InlineKeyboardMarkup:
+    return document_categories_keyboard("add", include_cancel=True)
 
 
 async def show_document_categories(message: Message) -> None:
     await message.answer(
-        "📂 Документы и материалы\n\nВыбери категорию:",
+        f"{get_emoji('documents')} Документы и материалы\n\nВыбери категорию:",
         reply_markup=_categories_keyboard("browse"),
+        parse_mode=ParseMode.HTML,
     )
 
 
 @router.message(Command("docs"))
-@router.message(F.text == "📂 Документы")
+@router.message(F.text == f"{get_btn_emoji('documents')} Документы")
 async def documents_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     await show_document_categories(message)
@@ -100,34 +110,58 @@ async def browse_category_handler(
         .order_by(ClassDocument.created_at, ClassDocument.id)
     )
     items = list(documents)
-    if not items:
-        await callback.answer()
-        if callback.message:
-            await callback.message.answer(
-                "В этой категории пока ничего нет.",
-                reply_markup=menu_back_keyboard(),
-            )
-        return
-
     keyboard = InlineKeyboardBuilder()
-    titles = []
+    titles: list[str] = []
     for document in items:
-        titles.append(f"• {document.title}")
+        titles.append(f"• {html.escape(document.title)}")
         if document.url:
-            keyboard.button(text=document.title, url=document.url)
+            keyboard.button(
+                text=get_button_label(document.title, icon_key="documents"),
+                url=document.url,
+            )
         elif document.file_id:
             keyboard.button(
-                text=document.title,
+                text=get_button_label(document.title, icon_key="attachment"),
                 callback_data=DocumentCallback(
                     action="download", value=str(document.id)
                 ).pack(),
             )
+    keyboard.button(
+        text=f"« {get_btn_emoji('back_categories')} Назад в категории",
+        callback_data=DocumentCallback(action="categories", value="").pack(),
+    )
+    keyboard.button(
+        text=get_button_label("Назад в главное меню", icon_key="back_arrow"),
+        callback_data=MenuCallback(action="home").pack(),
+    )
     keyboard.adjust(1)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
-            f"{CATEGORIES[callback_data.value]}\n\n" + "\n".join(titles),
+        listing = (
+            f"{get_emoji(CATEGORY_EMOJI[callback_data.value])} "
+            f"{CATEGORY_NAMES[callback_data.value]}\n\n" + "\n".join(titles)
+            if items
+            else (
+                f"{get_emoji(CATEGORY_EMOJI[callback_data.value])} "
+                f"{CATEGORY_NAMES[callback_data.value]}\n\n"
+                "В этой категории пока нет материалов."
+            )
+        )
+        await callback.message.edit_text(
+            listing,
             reply_markup=keyboard.as_markup(),
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@router.callback_query(DocumentCallback.filter(F.action == "categories"))
+async def document_categories_handler(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            f"{get_emoji('documents')} Документы и материалы\n\nВыбери категорию:",
+            reply_markup=_categories_keyboard("browse"),
+            parse_mode=ParseMode.HTML,
         )
 
 
@@ -156,8 +190,7 @@ async def download_document_handler(
         )
 
 
-@router.message(Command("docs_add"))
-async def document_add_start_handler(
+async def start_document_add(
     message: Message,
     state: FSMContext,
     role: str,
@@ -169,8 +202,13 @@ async def document_add_start_handler(
     await state.set_state(DocumentForm.category)
     await message.answer(
         "Выбери категорию документа:",
-        reply_markup=_categories_keyboard("add"),
+        reply_markup=_add_categories_keyboard(),
     )
+
+
+@router.message(Command("docs_add"))
+async def document_add_start_handler(message: Message, state: FSMContext, role: str) -> None:
+    await start_document_add(message, state, role)
 
 
 @router.callback_query(
@@ -194,7 +232,12 @@ async def document_category_handler(
     await state.set_state(DocumentForm.title)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Введи название документа:")
+        keyboard = InlineKeyboardBuilder()
+        add_cancel_button(keyboard)
+        await callback.message.edit_text(
+            "Введи название документа:",
+            reply_markup=keyboard.as_markup(),
+        )
 
 
 @router.message(DocumentForm.title, F.text)
@@ -214,8 +257,25 @@ async def document_title_handler(
     await state.update_data(title=title)
     await state.set_state(DocumentForm.content)
     await message.answer(
-        "Отправь файл документом или пришли текстовую ссылку (http...):"
+        "Отправь файл документом или пришли текстовую ссылку (http...):",
+        reply_markup=_cancel_keyboard(),
     )
+
+
+@router.message(DocumentForm.category)
+async def document_category_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, выбери категорию кнопкой.")
+
+
+@router.message(DocumentForm.title)
+async def document_title_fallback_handler(message: Message) -> None:
+    await message.answer("Пожалуйста, отправь название документа текстом.")
+
+
+def _cancel_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    add_cancel_button(keyboard)
+    return keyboard.as_markup()
 
 
 @router.message(DocumentForm.content)
@@ -257,9 +317,17 @@ async def document_content_handler(
         created_at=datetime.now(timezone.utc),
     )
     session.add(document)
+    await log_admin_action(
+        session,
+        user.id,
+        "Добавил документ",
+        f"название={document.title}, категория={document.category}",
+    )
     await session.commit()
     await state.clear()
     await message.answer(
-        f"Документ «{document.title}» сохранён в категории «{CATEGORIES[document.category]}».",
-        reply_markup=main_reply_keyboard(),
+        f"Документ «{html.escape(document.title)}» сохранён в категории "
+        f"«{CATEGORY_NAMES[document.category]}».",
+        reply_markup=main_reply_keyboard(role),
+        parse_mode=ParseMode.HTML,
     )

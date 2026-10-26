@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import sys
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
@@ -20,7 +23,10 @@ from bot.handlers.hw import router as hw_router
 from bot.handlers.replacements import router as replacements_router
 from bot.handlers.schedule import router as schedule_router
 from bot.middlewares.db import DbSessionMiddleware
+from bot.middlewares.access import AccessMiddleware
+from bot.middlewares.error import ErrorMiddleware
 from bot.middlewares.role import RoleMiddleware
+from bot.utils.emojis import get_emoji
 from config_loader import AppConfig, load_config
 from database.cleanup import clean_old_data
 from database.engine import async_engine, init_db
@@ -30,14 +36,32 @@ from database.models import ClassEvent
 logger = logging.getLogger(__name__)
 
 
+def configure_logging() -> None:
+    """Configure durable production logs before any background tasks start."""
+    log_dir = Path(__file__).resolve().parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    file_handler = RotatingFileHandler(
+        log_dir / "bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    for handler in (stdout_handler, file_handler):
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, handlers=[stdout_handler, file_handler], force=True)
+    logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
+
+
 async def _daily_cleanup(
     session_factory: async_sessionmaker[AsyncSession],
+    timezone_name: str,
 ) -> None:
     while True:
         await asyncio.sleep(24 * 60 * 60)
         try:
             async with session_factory() as session:
-                await clean_old_data(session)
+                await clean_old_data(session, timezone_name)
         except Exception:
             logger.exception("Ежедневная очистка устаревших данных завершилась ошибкой")
 
@@ -71,7 +95,8 @@ async def _daily_event_reminders(
                 await bot.send_message(
                     chat_id=config.bot.group_chat_id,
                     text=(
-                        f"🔔 <b>Напоминание на завтра ({tomorrow:%d.%m}):</b>\n"
+                        f"{get_emoji('reminder')} <b>Напоминание на завтра "
+                        f"({tomorrow:%d.%m}):</b>\n"
                         f"{event_lines}"
                     ),
                     parse_mode=ParseMode.HTML,
@@ -86,6 +111,7 @@ async def main() -> None:
     event_reminder_task: asyncio.Task[None] | None = None
 
     try:
+        configure_logging()
         config = load_config()
         await init_db()
         session_factory = async_sessionmaker(
@@ -96,10 +122,12 @@ async def main() -> None:
             await mark_past_absences_completed(session, config)
         try:
             async with session_factory() as session:
-                await clean_old_data(session)
+                await clean_old_data(session, config.bot.timezone)
         except Exception:
             logger.exception("Стартовая очистка устаревших данных завершилась ошибкой")
-        cleanup_task = asyncio.create_task(_daily_cleanup(session_factory))
+        cleanup_task = asyncio.create_task(
+            _daily_cleanup(session_factory, config.bot.timezone)
+        )
 
         bot = Bot(token=config.bot.token)
         event_reminder_task = asyncio.create_task(
@@ -109,10 +137,16 @@ async def main() -> None:
         dispatcher["config"] = config
 
         db_middleware = DbSessionMiddleware(session_factory)
+        access_middleware = AccessMiddleware()
+        error_middleware = ErrorMiddleware()
         role_middleware = RoleMiddleware()
+        dispatcher.message.outer_middleware(error_middleware)
         dispatcher.message.middleware(db_middleware)
+        dispatcher.message.middleware(access_middleware)
         dispatcher.message.middleware(role_middleware)
         dispatcher.callback_query.middleware(db_middleware)
+        dispatcher.callback_query.outer_middleware(error_middleware)
+        dispatcher.callback_query.middleware(access_middleware)
         dispatcher.callback_query.middleware(role_middleware)
 
         dispatcher.include_router(base_router)
