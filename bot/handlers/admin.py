@@ -23,10 +23,15 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.middlewares.access import ROLE_DENIED_TEXT
 from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import MenuCallback, add_cancel_button, menu_back_keyboard
 from bot.utils.homework_dates import local_today, next_lesson_date, subjects_for_date
-from bot.utils.schedule_parser import WEEKDAYS, parse_schedule
+from bot.utils.schedule_parser import (
+    WEEKDAYS,
+    lesson_numbers_for_day,
+    parse_schedule,
+)
 from bot.utils.subjects import all_subjects, upcoming_subjects
 from bot.utils.time_utils import (
     WEEK_PARITY_DATE_KEY,
@@ -46,6 +51,7 @@ from database.models import (
 )
 from bot.utils.admin_audit import log_admin_action
 from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
+from bot.utils.permissions import role_allows
 
 
 router = Router(name="admin")
@@ -135,6 +141,12 @@ class BroadcastCallback(CallbackData, prefix="admin_broadcast"):
 
 class AdminHistoryCallback(CallbackData, prefix="admin_history"):
     page: int
+
+
+class BanManagementCallback(CallbackData, prefix="ban_management"):
+    action: str
+    page: int = 0
+    telegram_id: int = 0
 
 
 class AdminManagementCallback(CallbackData, prefix="admin_management"):
@@ -317,6 +329,135 @@ async def admin_history_page_handler(
     text, keyboard = await _admin_history_page(session, max(0, callback_data.page))
     await callback.answer()
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+def _ban_management_keyboard(
+    users: list[User],
+    page: int,
+    has_next: bool,
+) -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    for user in users:
+        is_banned = bool(user.is_banned)
+        keyboard.button(
+            text=get_button_label(
+                "Разблокировать" if is_banned else "Заблокировать",
+                icon_key="restriction",
+            ),
+            callback_data=BanManagementCallback(
+                action="toggle",
+                page=page,
+                telegram_id=user.telegram_id,
+            ).pack(),
+            style="success" if is_banned else "danger",
+        )
+    if page > 0:
+        keyboard.button(
+            text=get_button_label("Назад", icon_key="back_arrow"),
+            callback_data=BanManagementCallback(action="page", page=page - 1).pack(),
+        )
+    if has_next:
+        keyboard.button(
+            text=get_button_label("Далее", icon_key="forward"),
+            callback_data=BanManagementCallback(action="page", page=page + 1).pack(),
+        )
+    keyboard.button(
+        text=get_button_label("В админку", icon_key="back_arrow"),
+        callback_data=MenuCallback(action="admin").pack(),
+    )
+    keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+async def _ban_management_page(
+    session: AsyncSession,
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    page_size = 10
+    users = list(
+        await session.scalars(
+            select(User)
+            .order_by(User.full_name, User.telegram_id)
+            .offset(page * page_size)
+            .limit(page_size + 1)
+        )
+    )
+    has_next = len(users) > page_size
+    users = users[:page_size]
+    lines = [f"{get_emoji('restriction')} Управление банами · страница {page + 1}"]
+    if not users:
+        lines.append("Зарегистрированных пользователей пока нет.")
+    for user in users:
+        name = html.escape(user.full_name or "Без имени")
+        status = "🔴 Заблокирован" if user.is_banned else "🟢 Активен"
+        lines.append(f"• {name} (ID: {user.telegram_id}) — {status}")
+    return "\n".join(lines), _ban_management_keyboard(users, page, has_next)
+
+
+async def show_user_bans(
+    message: Message,
+    session: AsyncSession,
+    page: int = 0,
+) -> None:
+    text, keyboard = await _ban_management_page(session, max(0, page))
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(BanManagementCallback.filter())
+async def ban_management_handler(
+    callback: CallbackQuery,
+    callback_data: BanManagementCallback,
+    session: AsyncSession,
+    role: str,
+    config: AppConfig,
+) -> None:
+    if not role_allows(role, "bans"):
+        await callback.answer(ROLE_DENIED_TEXT, show_alert=True)
+        return
+    page = max(0, callback_data.page)
+    if callback_data.action == "toggle":
+        user = await session.get(User, callback_data.telegram_id)
+        if user is None:
+            await callback.answer("Пользователь не найден.", show_alert=True)
+            return
+        configured_staff = (
+            set(config.roles.owner)
+            | set(config.roles.starosta)
+            | set(config.roles.moderators)
+        )
+        dynamic_role = await session.get(DynamicRole, callback_data.telegram_id)
+        if (
+            (
+                callback_data.telegram_id in configured_staff
+                or dynamic_role is not None
+            )
+            and not user.is_banned
+        ):
+            await callback.answer(
+                "Нельзя блокировать сотрудников.",
+                show_alert=True,
+            )
+            return
+        user.is_banned = not user.is_banned
+        action = "Разблокировал пользователя" if not user.is_banned else "Заблокировал пользователя"
+        await log_admin_action(
+            session,
+            callback.from_user.id,
+            action,
+            f"telegram_id={user.telegram_id}",
+        )
+        await session.commit()
+        await callback.answer(
+            "Пользователь разблокирован." if not user.is_banned else "Пользователь заблокирован."
+        )
+    elif callback_data.action == "page":
+        await callback.answer()
+    else:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    if callback.message is not None:
+        text, keyboard = await _ban_management_page(session, page)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 def _dynamic_roles_keyboard(roles: list[DynamicRole]) -> InlineKeyboardMarkup:
@@ -2078,15 +2219,18 @@ async def _prepare_schedule_time_preview(
         if mode == "all"
         else [row for row in existing if row.lesson_number != lesson_number] + [draft]
     )
+    lesson_numbers = lesson_numbers_for_day(lessons, config.schedule)
     clocks = calculate_lesson_times(
         (lesson.time for lesson in lessons),
         config.schedule.lesson_duration_minutes,
         effective,
+        lesson_numbers=lesson_numbers,
     )
     lines = [
         f"{get_emoji('shortened')} Предпросмотр звонков на {target_date:%d.%m.%Y}:",
     ]
-    for index, clock in enumerate(clocks, start=1):
+    clocks_by_slot = dict(zip(lesson_numbers, clocks))
+    for index, clock in clocks_by_slot.items():
         suffix = " (сокращённая)" if clock.shortened else ""
         lines.append(f"• {index} пара: {clock.start} — {clock.end}{suffix}")
     await state.set_state(ScheduleTimeOverrideForm.confirmation)
@@ -2244,17 +2388,19 @@ async def _send_schedule_time_broadcast(
     lessons: list[Lesson],
     overrides: list[ScheduleTimeOverride],
 ) -> tuple[int, int]:
+    lesson_numbers = lesson_numbers_for_day(lessons, config.schedule)
     clocks = calculate_lesson_times(
         (lesson.time for lesson in lessons),
         config.schedule.lesson_duration_minutes,
         overrides,
+        lesson_numbers=lesson_numbers,
     )
     text = (
         f"{get_emoji('notice')} Изменение расписания звонков "
         f"на {target_date:%d.%m.%Y}!\n"
         + "\n".join(
             f"• {index} пара: {clock.start} — {clock.end}"
-            for index, clock in enumerate(clocks, start=1)
+            for index, clock in dict(zip(lesson_numbers, clocks)).items()
         )
     )
     recipients = {student.telegram_id for student in config.students}

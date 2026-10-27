@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import unittest
 
-from bot.handlers.absent import _lesson_keyboard
+from bot.handlers.absent import LessonChoiceCallback, _lesson_keyboard
 from bot.handlers.hw import _homework_subject_keyboard
 from bot.handlers.replacements import _lesson_picker_keyboard
 from config_loader import Lesson
 from database.models import ScheduleOverride
+from bot.utils.emojis import get_custom_emoji_id
 
 
 def _buttons(markup):
@@ -23,10 +24,14 @@ class DynamicButtonStyleTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([button.text for button in buttons[:2]], [
-            "✅ Математика",
-            "◾ Физика",
-        ])
+        self.assertEqual(
+            [button.text for button in buttons[:2]],
+            ["Математика", "◾ Физика"],
+        )
+        self.assertEqual(
+            buttons[0].icon_custom_emoji_id,
+            get_custom_emoji_id("check"),
+        )
         self.assertEqual(
             [
                 button.model_dump(exclude_none=True).get("style")
@@ -61,7 +66,36 @@ class DynamicButtonStyleTests(unittest.TestCase):
             [None, "success"],
         )
         self.assertTrue(lesson_buttons[0].text.startswith("◾ 1."))
-        self.assertTrue(lesson_buttons[1].text.startswith("✅ 2."))
+        self.assertTrue(lesson_buttons[1].text.startswith("2."))
+        self.assertEqual(
+            lesson_buttons[1].icon_custom_emoji_id,
+            get_custom_emoji_id("check"),
+        )
+
+    def test_parallel_absence_lessons_share_one_numbered_button(self) -> None:
+        buttons = _buttons(
+            _lesson_keyboard(
+                [
+                    Lesson("08:00", "Английский", "301", "Учитель", "english"),
+                    Lesson("08:00", "Французский", "302", "Учитель", "french"),
+                    Lesson("09:40", "Математика", "303", "Учитель"),
+                ],
+                set(),
+                [1, 1, 2],
+            )
+        )
+
+        self.assertEqual(len(buttons), 5)
+        self.assertIn("1. Английский / Французский", buttons[1].text)
+        self.assertIn("2. Математика", buttons[2].text)
+        self.assertEqual(
+            LessonChoiceCallback.unpack(buttons[1].callback_data).lesson_number,
+            1,
+        )
+        self.assertEqual(
+            LessonChoiceCallback.unpack(buttons[2].callback_data).lesson_number,
+            2,
+        )
 
     def test_existing_replacements_and_cancellations_reflect_database_state(self) -> None:
         created_at = datetime.now(timezone.utc)
@@ -98,8 +132,8 @@ class DynamicButtonStyleTests(unittest.TestCase):
             ],
             [None, "success", "danger"],
         )
-        self.assertEqual(buttons[1].text, "🔄 2 пара")
-        self.assertEqual(buttons[2].text, "❌ 3 пара")
+        self.assertEqual(buttons[1].text, "2 пара")
+        self.assertEqual(buttons[2].text, "3 пара")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,9 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from bot.utils.emojis import get_btn_emoji
 
 
+DOCUMENTS_BUTTON_TEXT = f"{get_btn_emoji('folder')} Документы"
+
+
 def main_reply_keyboard(role: str = "user") -> ReplyKeyboardMarkup:
     keyboard = [
         [
@@ -10,7 +13,7 @@ def main_reply_keyboard(role: str = "user") -> ReplyKeyboardMarkup:
             KeyboardButton(text=f"{get_btn_emoji('homework')} ДЗ"),
         ],
         [
-            KeyboardButton(text=f"{get_btn_emoji('folder')} Документы"),
+            KeyboardButton(text=DOCUMENTS_BUTTON_TEXT),
             KeyboardButton(text=f"{get_btn_emoji('absence')} Мои отсутствия"),
         ],
         [KeyboardButton(text=f"{get_btn_emoji('users')} Моя подгруппа")],

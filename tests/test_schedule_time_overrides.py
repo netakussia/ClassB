@@ -7,7 +7,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, inspect, text
 
@@ -57,6 +58,17 @@ class ScheduleTimeOverrideTests(unittest.TestCase):
                 ("13:20", "14:50", False),
             ],
         )
+
+    def test_parallel_lessons_share_one_slot_clock(self) -> None:
+        clocks = calculate_lesson_times(
+            ["08:00", "08:00", "09:40"],
+            90,
+            lesson_numbers=[1, 1, 2],
+        )
+
+        self.assertEqual(clocks[0], clocks[1])
+        self.assertEqual(clocks[0], ("08:00", "09:30", False))
+        self.assertEqual(clocks[2], ("09:40", "11:10", False))
 
     def test_all_lessons_and_big_break_are_recalculated(self) -> None:
         clocks = calculate_lesson_times(
@@ -148,6 +160,73 @@ class ScheduleTimeOverrideTests(unittest.TestCase):
             self.assertIn("⚠️ Внимание! В этот день уроки сокращены!", rendered)
             self.assertIn("1. 08:00–08:45 | Matematica (сокращённый)", rendered)
             self.assertIn("2. 08:55–09:40 | Fizica (сокращённый)", rendered)
+
+        asyncio.run(run_test())
+
+    def test_schedule_moves_to_next_day_after_shortened_last_lesson(self) -> None:
+        async def run_test() -> None:
+            today = date(2026, 10, 28)
+            wednesday = [
+                Lesson("11:40", "Literatura", "214", "Teacher"),
+                Lesson("13:20", "Programming", "229", "Teacher"),
+                Lesson("15:00", "French", "208", "Teacher"),
+            ]
+            early_lessons = [
+                Lesson("08:00", "First", "101", "Teacher"),
+                Lesson("09:40", "Second", "102", "Teacher"),
+            ]
+            thursday = [Lesson("08:00", "Architecture", "202", "Teacher")]
+            config = AppConfig(
+                bot=BotConfig(token="test", timezone="Europe/Chisinau", group_chat_id=0),
+                roles=RolesConfig(owner=[], starosta=[], moderators=[]),
+                students=[],
+                students_path=Path("students.yaml"),
+                sanctions=SanctionsConfig(ban_threshold=3, ban_days=1),
+                schedule=ScheduleConfig(
+                    week_parity=WeekParity(today, "odd"),
+                    monday=DaySchedule(odd=early_lessons, even=early_lessons),
+                    tuesday=DaySchedule(odd=early_lessons, even=early_lessons),
+                    wednesday=DaySchedule(odd=wednesday, even=wednesday),
+                    thursday=DaySchedule(odd=thursday, even=thursday),
+                    friday=DaySchedule(odd=[], even=[]),
+                ),
+            )
+            time_overrides = [
+                ScheduleTimeOverride(
+                    target_date=today,
+                    lesson_number=5,
+                    duration_minutes=30,
+                    big_break_minutes=None,
+                    created_at=datetime(2026, 10, 27, tzinfo=timezone.utc),
+                )
+            ]
+
+            class Session:
+                async def get(self, model, key):
+                    return User(telegram_id=key) if model is User else None
+
+                async def scalars(self, statement):
+                    model = statement.column_descriptions[0]["entity"]
+                    if model is ScheduleOverride:
+                        return []
+                    if model is ScheduleTimeOverride:
+                        if today in statement.compile().params.values():
+                            return time_overrides
+                        return []
+                    raise AssertionError(f"Unexpected query for {model}")
+
+            message = SimpleNamespace(
+                from_user=SimpleNamespace(id=12, first_name="Test"),
+                answer=AsyncMock(),
+            )
+            fixed_now = datetime(2026, 10, 28, 15, 45, tzinfo=ZoneInfo("Europe/Chisinau"))
+            with patch("bot.handlers.schedule.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = fixed_now
+                await show_next_schedule(message, config, Session())
+
+            rendered = message.answer.await_args.args[0]
+            self.assertIn("Четверг, 29.10", rendered)
+            self.assertIn("Architecture", rendered)
 
         asyncio.run(run_test())
 

@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.inline import InlineKeyboardBuilder
+from bot.ai.personalization import personalized_greeting
 
 from bot.handlers.admin import (
     admin_broadcast_start_handler,
@@ -17,6 +18,7 @@ from bot.handlers.admin import (
     start_schedule_time_override,
     start_homework_add,
     start_student_add,
+    show_user_bans,
 )
 from bot.handlers.docs import show_document_categories, start_document_add
 from bot.handlers.events import start_event_add
@@ -40,6 +42,7 @@ from bot.ui import (
     remove_inline_screen,
 )
 from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
+from bot.utils.permissions import role_allows
 from config_loader import AppConfig
 from database.models import User
 
@@ -120,6 +123,7 @@ async def show_main_menu(
     role: str,
     user: User | None = None,
     display_name: str | None = None,
+    personalization: str = "",
 ) -> None:
     full_name = user.full_name if user and user.full_name else display_name or "студент"
     subgroup_names = {"english": "Английская", "french": "Французская"}
@@ -135,6 +139,7 @@ async def show_main_menu(
         f"Твоя подгруппа: <i>{get_emoji(subgroup_emoji)} "
         f"{html.escape(subgroup)}</i>.\n\n"
         f"Выбери нужное действие в меню ниже {get_emoji('down')}"
+        + (f"\n\n{html.escape(personalization)}" if personalization else "")
         + (
             f"\n\n{get_emoji('admin')} Доступна админ-панель."
             if role in ADMIN_ROLES
@@ -147,10 +152,32 @@ async def show_main_menu(
 
 
 @router.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext, role: str, session: AsyncSession) -> None:
+async def start_handler(
+    message: Message,
+    state: FSMContext,
+    role: str,
+    session: AsyncSession,
+    config: AppConfig,
+) -> None:
     await state.clear()
     user = await session.get(User, message.from_user.id) if message.from_user else None
-    await show_main_menu(message, role, user, message.from_user.full_name if message.from_user else None)
+    personalization = (
+        await personalized_greeting(
+            session,
+            message.from_user.id,
+            config.ai,
+            config.bot.timezone,
+        )
+        if message.chat.type == "private" and message.from_user is not None
+        else ""
+    )
+    await show_main_menu(
+        message,
+        role,
+        user,
+        message.from_user.full_name if message.from_user else None,
+        personalization,
+    )
 
 
 @router.message(Command("admin"))
@@ -289,12 +316,23 @@ async def menu_callback_handler(
             else "french" if user and user.subgroup == "french"
             else "users"
         )
+        personalization = (
+            await personalized_greeting(
+                session,
+                callback.from_user.id,
+                config.ai,
+                config.bot.timezone,
+            )
+            if callback.message.chat.type == "private"
+            else ""
+        )
         await callback.message.edit_text(
             f"{get_emoji('greeting')} Привет, <b>" + html.escape(full_name) + "</b>!\n"
             "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
             f"Твоя подгруппа: <i>{get_emoji(subgroup_emoji)} "
             f"{html.escape(subgroup)}</i>.\n\n"
-            f"Выбери нужное действие в меню ниже {get_emoji('down')}",
+            f"Выбери нужное действие в меню ниже {get_emoji('down')}"
+            + (f"\n\n{html.escape(personalization)}" if personalization else ""),
             reply_markup=main_menu_keyboard(role),
             parse_mode=ParseMode.HTML,
         )
@@ -339,11 +377,24 @@ async def menu_callback_handler(
         )
         return
 
-    if action in {"add_homework", "replace", "broadcast", "admin_history", "add_document", "add_event", "add_student", "class_absences", "restrictions", "activity", "schedule_time_overrides"} and role not in ADMIN_ROLES:
-        await callback.answer("Эта кнопка только для админов.", show_alert=True)
-        return
-    if action == "admin_management" and role != "owner":
-        await callback.answer("Управлять ролями может только владелец.", show_alert=True)
+    menu_permissions = {
+        "add_homework": "homework_management",
+        "replace": "replacements",
+        "broadcast": "broadcasts",
+        "admin_history": "admin_history",
+        "add_document": "documents_manage",
+        "add_event": "events_manage",
+        "add_student": "student_manage",
+        "bans": "bans",
+        "class_absences": "absence_review",
+        "restrictions": "absence_review",
+        "activity": "activity",
+        "schedule_time_overrides": "schedule_time",
+        "admin_management": "admin_management",
+    }
+    permission = menu_permissions.get(action)
+    if permission is not None and not role_allows(role, permission):
+        await callback.answer("⛔ Недостаточно прав для выполнения этой операции.", show_alert=True)
         return
 
     await callback.answer()
@@ -395,6 +446,8 @@ async def menu_callback_handler(
         await start_event_add(callback.message, state, role)
     elif action == "add_student":
         await start_student_add(callback.message, state, role)
+    elif action == "bans":
+        await show_user_bans(callback.message, session)
     elif action == "class_absences":
         await show_class_absences(callback.message, role, session, config)
     elif action == "restrictions":

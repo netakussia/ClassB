@@ -147,6 +147,10 @@ def migrate_users(connection: Connection) -> None:
         connection.execute(text("ALTER TABLE users ADD COLUMN last_action VARCHAR"))
     if "last_active_at" not in columns:
         connection.execute(text("ALTER TABLE users ADD COLUMN last_active_at DATETIME"))
+    if "is_banned" not in columns:
+        connection.execute(
+            text("ALTER TABLE users ADD COLUMN is_banned BOOLEAN NOT NULL DEFAULT 0")
+        )
 
 
 def migrate_schedule_overrides_cancellation(connection: Connection) -> None:

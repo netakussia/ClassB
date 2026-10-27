@@ -14,7 +14,7 @@ from bot.handlers.docs import (
 )
 from bot.handlers.base import menu_callback_handler
 from bot.handlers.base import _help_keyboard
-from bot.keyboards.reply import main_reply_keyboard
+from bot.keyboards.reply import DOCUMENTS_BUTTON_TEXT, main_reply_keyboard
 from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import (
     DOCUMENT_CATEGORIES,
@@ -25,6 +25,7 @@ from bot.ui import (
     edit_text_if_changed,
     main_menu_keyboard,
 )
+from bot.utils.emojis import get_custom_emoji_id, get_button_label
 from database.models import ClassDocument
 
 
@@ -77,9 +78,17 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(button.text, button.url) for button in contacts],
             [
-                ("🛠️ Написать модератору", "tg://user?id=200"),
-                ("🛠️ Написать модератору", "tg://user?id=201"),
-                ("👑 Написать владельцу", "tg://user?id=100"),
+                ("Написать модератору", "tg://user?id=200"),
+                ("Написать модератору", "tg://user?id=201"),
+                ("Написать владельцу", "tg://user?id=100"),
+            ],
+        )
+        self.assertEqual(
+            [button.icon_custom_emoji_id for button in contacts],
+            [
+                get_custom_emoji_id("admin"),
+                get_custom_emoji_id("admin"),
+                get_custom_emoji_id("owner"),
             ],
         )
         self.assertTrue(all("<tg-emoji" not in button.text for button in buttons))
@@ -90,17 +99,30 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [button.text for button in buttons[:4]],
             [
-                "📁 Лабораторные",
-                "📚 Методички",
-                "📝 Шаблоны",
-                "☁️ Облако",
+                "Лабораторные",
+                "Методички",
+                "Шаблоны",
+                "Облако",
+            ],
+        )
+        self.assertEqual(
+            [button.icon_custom_emoji_id for button in buttons[:4]],
+            [
+                get_custom_emoji_id("laboratory"),
+                get_custom_emoji_id("manual"),
+                get_custom_emoji_id("template"),
+                get_custom_emoji_id("cloud"),
             ],
         )
         self.assertEqual(
             [DocumentCallback.unpack(button.callback_data).value for button in buttons[:4]],
             list(DOCUMENT_CATEGORIES),
         )
-        self.assertEqual(buttons[-1].text, "⬅️ Назад в главное меню")
+        self.assertEqual(buttons[-1].text, "Назад в главное меню")
+        self.assertEqual(
+            buttons[-1].icon_custom_emoji_id,
+            get_custom_emoji_id("back_arrow"),
+        )
         self.assertEqual(
             [button.model_dump(exclude_none=True).get("style") for button in buttons],
             ["primary", "primary", "primary", "primary", None],
@@ -113,7 +135,16 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
     async def test_main_start_menu_contains_documents_entry(self) -> None:
         buttons = _buttons(main_menu_keyboard("user"))
 
-        documents_button = next(button for button in buttons if button.text == "📁 Документы")
+        documents_button = next(
+            button
+            for button in buttons
+            if MenuCallback.unpack(button.callback_data).action == "documents"
+        )
+        self.assertEqual(documents_button.text, "Документы")
+        self.assertEqual(
+            documents_button.icon_custom_emoji_id,
+            get_custom_emoji_id("documents"),
+        )
         self.assertTrue(
             all(
                 button.model_dump(exclude_none=True).get("style") == "primary"
@@ -196,12 +227,16 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
             action="download", value="1"
         ).pack())
         self.assertEqual(buttons[1].url, "https://example.test/guide")
-        self.assertEqual(buttons[-2].text, "« 🔙 Назад в категории")
+        self.assertEqual(buttons[-2].text, "« Назад в категории")
+        self.assertEqual(
+            buttons[-2].icon_custom_emoji_id,
+            get_custom_emoji_id("back_categories"),
+        )
         self.assertEqual(
             MenuCallback.unpack(buttons[-1].callback_data).action,
             "home",
         )
-        self.assertEqual(buttons[-1].text, "⬅️ Назад в главное меню")
+        self.assertEqual(buttons[-1].text, "Назад в главное меню")
         self.assertEqual(
             [button.model_dump(exclude_none=True).get("style") for button in buttons],
             ["primary", "primary", None, None],
@@ -231,8 +266,8 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
             [button.text for button in buttons[:4]],
             list(DOCUMENT_CATEGORIES.values()),
         )
-        self.assertEqual(buttons[-2].text, "⬅️ Назад в главное меню")
-        self.assertEqual(buttons[-1].text, "❌ Отменить")
+        self.assertEqual(buttons[-2].text, "Назад в главное меню")
+        self.assertEqual(buttons[-1].text, "Отменить")
 
     async def test_inline_and_reply_button_labels_are_unicode_plain_text(self) -> None:
         inline_keyboards = [
@@ -260,7 +295,8 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("📅 Расписание", reply_labels)
         self.assertIn("📚 ДЗ", reply_labels)
-        self.assertIn("📁 Документы", reply_labels)
+        self.assertIn(DOCUMENTS_BUTTON_TEXT, reply_labels)
+        self.assertEqual(DOCUMENTS_BUTTON_TEXT, "📁 Документы")
         self.assertIn("⚙️ Админка", reply_labels)
 
     async def test_inline_builder_serializes_native_button_styles(self) -> None:
@@ -291,6 +327,23 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
             [button["text"] for button in serialized],
             ["Назад", "Сохранить", "Отмена"],
         )
+
+    async def test_inline_builder_sends_native_emoji_without_unicode_duplicate(self) -> None:
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(
+            text=get_button_label("Расписание", icon_key="schedule"),
+            callback_data="schedule",
+            style="primary",
+        )
+
+        button, = _buttons(keyboard.as_markup())
+        serialized = button.model_dump(exclude_none=True)
+        self.assertEqual(serialized["text"], "Расписание")
+        self.assertEqual(
+            serialized["icon_custom_emoji_id"],
+            get_custom_emoji_id("schedule"),
+        )
+        self.assertEqual(serialized["style"], "primary")
 
 
 if __name__ == "__main__":

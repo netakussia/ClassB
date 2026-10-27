@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 import os
 from pathlib import Path
@@ -38,6 +38,31 @@ class StudentConfig:
 class SanctionsConfig:
     ban_threshold: int
     ban_days: int
+
+
+@dataclass(frozen=True, slots=True)
+class AIConfig:
+    enabled: bool = False
+    project_limits_verified: bool = False
+    humor_enabled: bool = False
+    personalization_enabled: bool = False
+    reactions_enabled: bool = False
+    model: str = "gemini-3.5-flash-lite"
+    api_key: str | None = None
+    user_daily_limit: int = 25
+    user_per_minute_limit: int = 3
+    global_daily_limit: int = 100
+    global_per_minute_limit: int = 10
+    global_tokens_per_minute: int = 10000
+    prompt_token_reserve: int = 512
+    max_input_chars: int = 500
+    joke_max_output_tokens: int = 120
+    timeout_seconds: int = 15
+    retries: int = 1
+    personalization_cache_hours: int = 5
+    joke_repeat_window_minutes: int = 30
+    activity_retention_days: int = 30
+    quota_retention_days: int = 31
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +125,7 @@ class AppConfig:
     students_path: Path
     sanctions: SanctionsConfig
     schedule: ScheduleConfig
+    ai: AIConfig = field(default_factory=AIConfig)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -257,8 +283,71 @@ def _schedule_config(data: dict[str, Any], path: Path) -> ScheduleConfig:
     )
 
 
+def _ai_config(directory: Path) -> AIConfig:
+    path = directory / "ai.yaml"
+    if path.exists():
+        data = _load_yaml(path)
+    else:
+        data = {}
+
+    defaults: dict[str, Any] = {
+        "enabled": False,
+        "project_limits_verified": False,
+        "humor_enabled": False,
+        "personalization_enabled": False,
+        "reactions_enabled": False,
+        "model": "gemini-3.5-flash-lite",
+        "user_daily_limit": 25,
+        "user_per_minute_limit": 3,
+        "global_daily_limit": 100,
+        "global_per_minute_limit": 10,
+        "global_tokens_per_minute": 10000,
+        "prompt_token_reserve": 512,
+        "max_input_chars": 500,
+        "joke_max_output_tokens": 120,
+        "timeout_seconds": 15,
+        "retries": 1,
+        "personalization_cache_hours": 5,
+        "joke_repeat_window_minutes": 30,
+        "activity_retention_days": 30,
+        "quota_retention_days": 31,
+    }
+    values = {key: data.get(key, default) for key, default in defaults.items()}
+    for key in (
+        "enabled", "project_limits_verified", "humor_enabled",
+        "personalization_enabled", "reactions_enabled",
+    ):
+        if type(values[key]) is not bool:
+            raise ValueError(f"{key} in {path} must be a boolean")
+    if not isinstance(values["model"], str) or not values["model"].strip():
+        raise ValueError(f"model in {path} must be a non-empty string")
+    for key in defaults.keys() - {
+        "enabled", "project_limits_verified", "humor_enabled",
+        "personalization_enabled", "reactions_enabled", "model"
+    }:
+        if key == "retries":
+            continue
+        if type(values[key]) is not int or values[key] <= 0:
+            raise ValueError(f"{key} in {path} must be a positive integer")
+    if type(values["retries"]) is not int or values["retries"] not in {0, 1}:
+        raise ValueError(f"retries in {path} must be 0 or 1")
+    if values["user_daily_limit"] > 25 or values["user_per_minute_limit"] > 3:
+        raise ValueError("AI user quotas cannot exceed 25 requests/day and 3 requests/minute")
+    if values["max_input_chars"] > 500 or values["joke_max_output_tokens"] > 120:
+        raise ValueError("AI input/output limits cannot exceed 500 characters/120 tokens")
+    if values["retries"] > 1:
+        raise ValueError("AI retries cannot exceed one retry")
+    if values["joke_repeat_window_minutes"] > 1440:
+        raise ValueError("joke_repeat_window_minutes cannot exceed one day")
+
+    return AIConfig(
+        **values,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+
 def load_config(config_dir: str | Path | None = None) -> AppConfig:
-    """Load and validate bot configuration from five YAML files.
+    """Load and validate core YAML files plus the optional AI configuration.
 
     By default, the ``config/`` directory next to this module is used.
     """
@@ -295,4 +384,5 @@ def load_config(config_dir: str | Path | None = None) -> AppConfig:
             ban_days=_required(sanctions_data, "ban_days", int, sanctions_path),
         ),
         schedule=_schedule_config(schedule_data, schedule_path),
+        ai=_ai_config(directory),
     )

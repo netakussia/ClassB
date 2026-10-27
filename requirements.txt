@@ -1,5 +1,6 @@
-aiogram>=3.0,<4.0
+aiogram>=3.31.0,<4.0
 SQLAlchemy[asyncio]>=2.0,<3.0
 aiosqlite>=0.19
 PyYAML>=6.0
 python-dotenv>=1.0
+google-genai>=1.0,<2.0

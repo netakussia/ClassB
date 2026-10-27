@@ -28,6 +28,17 @@ _EMOJI_SEQUENCE_CHARACTERS = {
 }
 
 
+class _ButtonLabel(str):
+    label: str
+    icon_key: str
+
+    def __new__(cls, text: str, label: str, icon_key: str) -> _ButtonLabel:
+        instance = super().__new__(cls, text)
+        instance.label = label
+        instance.icon_key = icon_key
+        return instance
+
+
 def _is_emoji_character(character: str) -> bool:
     codepoint = ord(character)
     return (
@@ -106,6 +117,11 @@ def get_btn_emoji(key: str) -> str:
     return _emoji_value(key)[0]
 
 
+def get_custom_emoji_id(key: str) -> str | None:
+    """Return a Telegram custom-emoji ID, or None when the key has no custom emoji."""
+    return _emoji_value(key)[1]
+
+
 def get_button_label(
     label: str,
     *,
@@ -113,4 +129,7 @@ def get_button_label(
 ) -> str:
     """Build a plain-text button label with an optional Unicode icon."""
     icon = f" {get_btn_emoji(icon_key)}" if icon_key is not None else ""
-    return f"{icon} {label}".lstrip()
+    text = f"{icon} {label}".lstrip()
+    if icon_key is not None:
+        return _ButtonLabel(text, label, icon_key)
+    return text

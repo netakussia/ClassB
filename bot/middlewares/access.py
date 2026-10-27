@@ -2,21 +2,91 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config_loader import AppConfig, StudentConfig
 from bot.utils.emojis import get_btn_emoji, get_emoji
-from database.models import DynamicRole, User
+from database.models import AIActivityDaily, AIUserSettings, DynamicRole, User
+from bot.utils.permissions import role_allows
 
+logger = logging.getLogger(__name__)
 
+BAN_DENIED_TEXT = (
+    "⛔ Ваш аккаунт заблокирован администратором. Вам доступен только просмотр ДЗ."
+)
+ROLE_DENIED_TEXT = "⛔ Недостаточно прав для выполнения этой операции."
 ACCESS_DENIED_TEXT = (
     f"{get_btn_emoji('forbidden')} Доступ ограничен. "
     "Бот предназначен только для студентов группы RC-215."
 )
+
+COMMAND_PERMISSIONS = {
+    "/admin": "admin_panel",
+    "/hw_add": "homework_management",
+    "/replace": "replacements",
+    "/broadcast": "broadcasts",
+    "/set_parity": "week_parity",
+    "/activity": "activity",
+    "/admin_history": "admin_history",
+    "/docs_add": "documents_manage",
+    "/event_add": "events_manage",
+    "/absences": "absence_review",
+    "/unban_absent": "absence_review",
+    "/schedule_time": "schedule_time",
+}
+
+MENU_PERMISSIONS = {
+    "admin": "admin_panel",
+    "add_homework": "homework_management",
+    "replace": "replacements",
+    "broadcast": "broadcasts",
+    "set_parity": "week_parity",
+    "activity": "activity",
+    "admin_history": "admin_history",
+    "admin_management": "admin_management",
+    "add_document": "documents_manage",
+    "add_event": "events_manage",
+    "add_student": "student_manage",
+    "bans": "bans",
+    "class_absences": "absence_review",
+    "restrictions": "absence_review",
+    "schedule_time_overrides": "schedule_time",
+}
+
+CALLBACK_PERMISSIONS = {
+    "admin_management": "admin_management",
+    "dynamic_role": "admin_management",
+    "admin_broadcast": "broadcasts",
+    "week_parity": "week_parity",
+    "admin_history": "admin_history",
+    "ban_management": "bans",
+    "schedule_time": "schedule_time",
+    "schedule_time_lesson": "schedule_time",
+    "student_add_subgroup": "student_manage",
+    "event_category": "events_manage",
+    "abs_user": "absence_review",
+}
+
+STATE_PERMISSIONS = {
+    "AdminManagementForm": "admin_management",
+    "BroadcastForm": "broadcasts",
+    "WeekParityForm": "week_parity",
+    "ScheduleTimeOverrideForm": "schedule_time",
+    "StudentAddForm": "student_manage",
+    "EventForm": "events_manage",
+    "DocumentForm": "documents_manage",
+    "HomeworkForm": "homework_management",
+    "ReplaceForm": "replacements",
+}
+
+HOMEWORK_CALLBACK_ACTIONS = {"subjects", "subject", "day", "day_subject"}
 
 COMMAND_ACTIONS = {
     "/start": "Открыл главное меню",
@@ -109,6 +179,75 @@ def record_user_activity(user: User, event: Message | CallbackQuery) -> None:
     user.last_active_at = datetime.now(timezone.utc)
 
 
+def _private_activity_category(event: Message | CallbackQuery) -> str | None:
+    if isinstance(event, CallbackQuery):
+        parts = (event.data or "").split(":")
+        if len(parts) == 2 and parts[0] == "menu":
+            return {
+                "homework": "homework",
+                "schedule": "schedule",
+                "help": "help",
+                "documents": "documents",
+            }.get(parts[1])
+        return None
+
+    text = (event.text or "").strip().casefold()
+    if not text:
+        return None
+    command = text.split(maxsplit=1)[0].split("@", maxsplit=1)[0]
+    if command in {"/hw"}:
+        return "homework"
+    if command in {"/schedule", "/расписание"}:
+        return "schedule"
+    if command == "/help":
+        return "help"
+    if command == "/docs":
+        return "documents"
+    if text.endswith(" дз"):
+        return "homework"
+    if text.endswith(" расписание"):
+        return "schedule"
+    if text.endswith(" документы"):
+        return "documents"
+    return None
+
+
+async def _record_ai_activity(
+    session: AsyncSession,
+    event: Message | CallbackQuery,
+    telegram_id: int,
+    config: AppConfig,
+    raw_state: object,
+) -> None:
+    if not config.ai.personalization_enabled or raw_state is not None:
+        return
+    settings = await session.get(AIUserSettings, telegram_id)
+    if settings is None or not settings.personalization_enabled:
+        return
+    category = _private_activity_category(event)
+    if category is None:
+        return
+    local_date = datetime.now(ZoneInfo(config.bot.timezone)).date()
+    statement = (
+        insert(AIActivityDaily)
+        .values(
+            telegram_id=telegram_id,
+            activity_date=local_date,
+            category=category,
+            count=1,
+        )
+        .on_conflict_do_update(
+            index_elements=["telegram_id", "activity_date", "category"],
+            set_={"count": AIActivityDaily.count + 1},
+        )
+    )
+    try:
+        async with session.begin_nested():
+            await session.execute(statement)
+    except Exception as exc:
+        logger.warning("Could not record local AI activity aggregate (%s)", type(exc).__name__)
+
+
 class AccessMiddleware(BaseMiddleware):
     """Allow only configured students and staff, and sync roster data to the DB."""
 
@@ -130,6 +269,80 @@ class AccessMiddleware(BaseMiddleware):
                 "Бот предназначен только для студентов группы RC-215.",
                 parse_mode="HTML",
             )
+
+    @staticmethod
+    async def _deny_banned(event: TelegramObject) -> None:
+        if isinstance(event, CallbackQuery):
+            await event.answer(BAN_DENIED_TEXT, show_alert=True)
+        elif isinstance(event, Message):
+            await event.answer(BAN_DENIED_TEXT)
+
+    @staticmethod
+    async def _deny_role(event: TelegramObject) -> None:
+        if isinstance(event, CallbackQuery):
+            await event.answer(ROLE_DENIED_TEXT, show_alert=True)
+        elif isinstance(event, Message):
+            await event.answer(ROLE_DENIED_TEXT)
+
+    @staticmethod
+    def _command(event: Message) -> str | None:
+        text = (event.text or "").strip()
+        if not text.startswith("/"):
+            return None
+        return text.split(maxsplit=1)[0].split("@", maxsplit=1)[0].lower()
+
+    @staticmethod
+    def _callback_permission(callback_data: str) -> str | None:
+        parts = callback_data.split(":")
+        prefix = parts[0]
+        if prefix == "menu":
+            return MENU_PERMISSIONS.get(parts[1]) if len(parts) > 1 else None
+        if prefix == "hwui":
+            return None
+        if prefix == "abs":
+            return "absence_review" if len(parts) > 1 and parts[1] == "flag" else None
+        if prefix == "docs":
+            return "documents_manage" if len(parts) > 1 and parts[1] == "add" else None
+        if prefix.startswith("hw_add") or prefix == "hw_overwrite":
+            return "homework_management"
+        if prefix.startswith("replace"):
+            return "replacements"
+        return CALLBACK_PERMISSIONS.get(prefix)
+
+    @staticmethod
+    def _state_permission(raw_state: object) -> str | None:
+        if not isinstance(raw_state, str):
+            return None
+        state_group = raw_state.split(":", maxsplit=1)[0]
+        return STATE_PERMISSIONS.get(state_group)
+
+    @classmethod
+    def _permission(
+        cls,
+        event: TelegramObject,
+        raw_state: object,
+    ) -> str | None:
+        if isinstance(event, Message):
+            command = cls._command(event)
+            if command is not None:
+                return COMMAND_PERMISSIONS.get(command)
+            return cls._state_permission(raw_state)
+        if isinstance(event, CallbackQuery):
+            return cls._callback_permission(event.data or "")
+        return None
+
+    @staticmethod
+    def _is_homework_view(event: TelegramObject) -> bool:
+        if isinstance(event, Message):
+            return AccessMiddleware._command(event) == "/hw"
+        if isinstance(event, CallbackQuery):
+            parts = (event.data or "").split(":")
+            return (
+                len(parts) >= 2
+                and parts[0] == "hwui"
+                and parts[1] in HOMEWORK_CALLBACK_ACTIONS
+            )
+        return False
 
     async def __call__(
         self,
@@ -168,6 +381,29 @@ class AccessMiddleware(BaseMiddleware):
             user = User(telegram_id=telegram_id)
             session.add(user)
 
+        if user.is_banned and not self._is_homework_view(event):
+            await self._deny_banned(event)
+            return None
+
+        role = data.get("role")
+        if not isinstance(role, str):
+            roles = config.roles
+            if telegram_id in roles.owner:
+                role = "owner"
+            elif telegram_id in roles.starosta:
+                role = "starosta"
+            elif telegram_id in roles.moderators:
+                role = "moderator"
+            elif has_dynamic_role and dynamic_role is not None:
+                role = dynamic_role.role
+            else:
+                role = "user"
+            data["role"] = role
+        permission = self._permission(event, data.get("raw_state"))
+        if permission is not None and not role_allows(role, permission):
+            await self._deny_role(event)
+            return None
+
         # Roster fields are authoritative.  Staff outside the roster retain any
         # existing fields but can still use the administrative bot functions.
         if student is not None:
@@ -177,6 +413,19 @@ class AccessMiddleware(BaseMiddleware):
             user.username = telegram_user.username
         if isinstance(event, (Message, CallbackQuery)):
             record_user_activity(user, event)
+        event_chat = (
+            event.chat if isinstance(event, Message)
+            else event.message.chat if isinstance(event, CallbackQuery) and event.message is not None
+            else None
+        )
+        if event_chat is not None and event_chat.type == "private":
+            await _record_ai_activity(
+                session,
+                event,
+                telegram_id,
+                config,
+                data.get("raw_state"),
+            )
         await session.commit()
         data["student"] = student
         return await handler(event, data)

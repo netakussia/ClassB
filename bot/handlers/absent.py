@@ -20,7 +20,12 @@ from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import MenuCallback, menu_back_keyboard
 from bot.utils.admin_audit import log_admin_action
 from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
-from bot.utils.schedule_parser import WEEKDAYS, Lesson, parse_schedule
+from bot.utils.schedule_parser import (
+    WEEKDAYS,
+    Lesson,
+    lesson_numbers_for_day,
+    parse_schedule,
+)
 from bot.utils.time_utils import get_configured_week_parity, parse_day_month_date
 from config_loader import AppConfig
 from database.models import Absence, User
@@ -137,6 +142,7 @@ def _date_keyboard() -> InlineKeyboardMarkup:
 def _lesson_keyboard(
     lessons: list[Lesson],
     selected_lessons: set[int],
+    lesson_numbers: list[int] | None = None,
 ) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(
@@ -144,13 +150,21 @@ def _lesson_keyboard(
         callback_data=SimpleActionCallback(action="all").pack(),
         style="primary",
     )
-    for number, lesson in enumerate(lessons, start=1):
+    numbers = lesson_numbers or list(range(1, len(lessons) + 1))
+    subjects_by_slot: dict[int, list[str]] = {}
+    for number, lesson in zip(numbers, lessons):
+        subjects = subjects_by_slot.setdefault(number, [])
+        if lesson.subject not in subjects:
+            subjects.append(lesson.subject)
+    for number, subjects in subjects_by_slot.items():
         is_selected = number in selected_lessons
         mark = f"{get_btn_emoji('check')} " if is_selected else "◾ "
-        button_options = {"style": "success"} if is_selected else {}
+        button_options = (
+            {"style": "success", "icon_key": "check"} if is_selected else {}
+        )
         keyboard.button(
             text=get_button_label(
-                f"{mark}{number}. {lesson.subject}"
+                f"{mark}{number}. {' / '.join(subjects)}"
             ),
             callback_data=LessonChoiceCallback(
                 action="lesson", lesson_number=number
@@ -225,17 +239,24 @@ async def _show_lesson_selection(
         await message.answer(f"На {target_date:%d.%m.%Y} уроков нет, заявку создать нельзя.")
         return
 
+    lesson_numbers = lesson_numbers_for_day(lessons, config.schedule)
     await state.update_data(
         target_date=target_date.isoformat(),
-        lesson_count=len(lessons),
+        lesson_numbers=lesson_numbers,
         selected_lessons=[],
     )
     await state.set_state(AbsentForm.lesson_selection)
     prompt = f"Выберите уроки на {target_date:%d.%m.%Y} (можно несколько):"
     if replace_message:
-        await message.edit_text(prompt, reply_markup=_lesson_keyboard(lessons, set()))
+        await message.edit_text(
+            prompt,
+            reply_markup=_lesson_keyboard(lessons, set(), lesson_numbers),
+        )
     else:
-        await message.answer(prompt, reply_markup=_lesson_keyboard(lessons, set()))
+        await message.answer(
+            prompt,
+            reply_markup=_lesson_keyboard(lessons, set(), lesson_numbers),
+        )
 
 
 async def _save_absence(
@@ -447,14 +468,18 @@ async def absent_lesson_choice_handler(
     session: AsyncSession,
 ) -> None:
     form_data = await state.get_data()
-    lesson_count = form_data.get("lesson_count")
+    lesson_numbers = form_data.get("lesson_numbers")
     selected_raw = form_data.get("selected_lessons", [])
-    if not isinstance(lesson_count, int) or not isinstance(selected_raw, list):
+    if (
+        not isinstance(lesson_numbers, list)
+        or any(not isinstance(item, int) for item in lesson_numbers)
+        or not isinstance(selected_raw, list)
+    ):
         await state.clear()
         await callback.answer("Данные заявки потеряны. Начните заново.", show_alert=True)
         return
     lesson_number = callback_data.lesson_number
-    if lesson_number not in range(1, lesson_count + 1):
+    if lesson_number not in lesson_numbers:
         await callback.answer("Такого урока нет.", show_alert=True)
         return
 
@@ -479,7 +504,11 @@ async def absent_lesson_choice_handler(
             await callback.answer("Расписание недоступно. Начните заново.", show_alert=True)
             return
         await callback.message.edit_reply_markup(
-            reply_markup=_lesson_keyboard(lessons, selected)
+            reply_markup=_lesson_keyboard(
+                lessons,
+                selected,
+                lesson_numbers_for_day(lessons, config.schedule),
+            )
         )
     await callback.answer()
 

@@ -47,7 +47,7 @@ def _homework_subject_keyboard(
         has_hw = subject in homework_subjects
         if has_hw:
             mark = get_btn_emoji("check")
-            button_options = {"style": "success"}
+            button_options = {"style": "success", "icon_key": "check"}
         else:
             mark = "◾"
             button_options = {}

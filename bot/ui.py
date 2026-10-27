@@ -8,7 +8,8 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.keyboards.inline import InlineKeyboardBuilder
-from bot.utils.emojis import get_btn_emoji, get_button_label
+from bot.utils.emojis import get_button_label
+from bot.utils.permissions import role_allows
 
 
 ADMIN_ROLES = {"owner", "starosta", "moderator"}
@@ -28,10 +29,16 @@ class DocumentCallback(CallbackData, prefix="docs"):
 
 
 DOCUMENT_CATEGORIES = {
-    "labs": f"{get_btn_emoji('laboratory')} Лабораторные",
-    "manuals": f"{get_btn_emoji('manual')} Методички",
-    "templates": f"{get_btn_emoji('template')} Шаблоны",
-    "cloud": f"{get_btn_emoji('cloud')} Облако",
+    "labs": "Лабораторные",
+    "manuals": "Методички",
+    "templates": "Шаблоны",
+    "cloud": "Облако",
+}
+DOCUMENT_CATEGORY_EMOJI = {
+    "labs": "laboratory",
+    "manuals": "manual",
+    "templates": "template",
+    "cloud": "cloud",
 }
 
 
@@ -78,7 +85,7 @@ def main_menu_keyboard(role: str) -> InlineKeyboardMarkup:
         style="primary",
     )
     keyboard.button(
-        text=get_button_label("Документы", icon_key="folder"),
+        text=get_button_label("Документы", icon_key="documents"),
         callback_data=MenuCallback(action="documents").pack(),
         style="primary",
     )
@@ -102,67 +109,28 @@ def main_menu_keyboard(role: str) -> InlineKeyboardMarkup:
 
 def admin_menu_keyboard(role: str = "user") -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(
-        text=get_button_label("Добавить ДЗ", icon_key="add"),
-        callback_data=MenuCallback(action="add_homework").pack(),
-        style="primary",
+    items = (
+        ("homework_management", "Добавить ДЗ", "add", "add_homework"),
+        ("replacements", "Замена уроков", "replacement", "replace"),
+        ("broadcasts", "Создать рассылку", "notice", "broadcast"),
+        ("schedule_time", "Сокращённые уроки", "timer", "schedule_time_overrides"),
+        ("documents_manage", "Загрузить файл", "attachment", "add_document"),
+        ("events_manage", "Новое событие", "add", "add_event"),
+        ("student_manage", "Добавить студента", "add", "add_student"),
+        ("bans", "Управление банами", "restriction", "bans"),
+        ("absence_review", "Рапортичка отсутствий", "cases", "class_absences"),
+        ("absence_review", "Снять ограничение отсутствий", "restriction", "restrictions"),
+        ("activity", "Активность", "activity", "activity"),
+        ("admin_history", "История действий админов", "history", "admin_history"),
+        ("admin_management", "Управление администраторами", "users", "admin_management"),
     )
-    keyboard.button(
-        text=get_button_label("Замена уроков", icon_key="replacement"),
-        callback_data=MenuCallback(action="replace").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Создать рассылку", icon_key="notice"),
-        callback_data=MenuCallback(action="broadcast").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Сокращения", icon_key="timer"),
-        callback_data=MenuCallback(action="schedule_time_overrides").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Загрузить файл", icon_key="attachment"),
-        callback_data=MenuCallback(action="add_document").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Новое событие", icon_key="add"),
-        callback_data=MenuCallback(action="add_event").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Добавить студента", icon_key="add"),
-        callback_data=MenuCallback(action="add_student").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Рапортичка отсутствий", icon_key="cases"),
-        callback_data=MenuCallback(action="class_absences").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Снять бан", icon_key="restriction"),
-        callback_data=MenuCallback(action="restrictions").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("Активность", icon_key="activity"),
-        callback_data=MenuCallback(action="activity").pack(),
-        style="primary",
-    )
-    keyboard.button(
-        text=get_button_label("История действий админов", icon_key="history"),
-        callback_data=MenuCallback(action="admin_history").pack(),
-        style="primary",
-    )
-    if role == "owner":
-        keyboard.button(
-            text=get_button_label("Управление администраторами", icon_key="users"),
-            callback_data=MenuCallback(action="admin_management").pack(),
-            style="primary",
-        )
+    for permission, label, icon_key, action in items:
+        if role_allows(role, permission):
+            keyboard.button(
+                text=get_button_label(label, icon_key=icon_key),
+                callback_data=MenuCallback(action=action).pack(),
+                style="primary",
+            )
     keyboard.button(
         text=get_button_label("Обычное меню", icon_key="back_arrow"),
         callback_data=MenuCallback(action="home").pack(),
@@ -190,7 +158,10 @@ def document_categories_keyboard(
     keyboard = InlineKeyboardBuilder()
     for category, label in DOCUMENT_CATEGORIES.items():
         keyboard.button(
-            text=get_button_label(label),
+            text=get_button_label(
+                label,
+                icon_key=DOCUMENT_CATEGORY_EMOJI[category],
+            ),
             callback_data=DocumentCallback(action=action, value=category).pack(),
             style="primary",
         )

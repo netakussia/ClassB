@@ -14,6 +14,9 @@ from aiogram.enums import ParseMode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bot.ai.gateway import AIGateway
+from bot.ai.gemini_client import GeminiClient
+from bot.handlers.ai import router as ai_router
 from bot.handlers.admin import router as admin_router
 from bot.handlers.absent import mark_past_absences_completed, router as absent_router
 from bot.handlers.base import router as base_router
@@ -55,13 +58,18 @@ def configure_logging() -> None:
 
 async def _daily_cleanup(
     session_factory: async_sessionmaker[AsyncSession],
-    timezone_name: str,
+    config: AppConfig,
 ) -> None:
     while True:
         await asyncio.sleep(24 * 60 * 60)
         try:
             async with session_factory() as session:
-                await clean_old_data(session, timezone_name)
+                await clean_old_data(
+                    session,
+                    config.bot.timezone,
+                    activity_retention_days=config.ai.activity_retention_days,
+                    quota_retention_days=config.ai.quota_retention_days,
+                )
         except Exception:
             logger.exception("Ежедневная очистка устаревших данных завершилась ошибкой")
 
@@ -107,6 +115,7 @@ async def _daily_event_reminders(
 
 async def main() -> None:
     bot: Bot | None = None
+    gemini_client: GeminiClient | None = None
     cleanup_task: asyncio.Task[None] | None = None
     event_reminder_task: asyncio.Task[None] | None = None
 
@@ -118,15 +127,45 @@ async def main() -> None:
             bind=async_engine,
             expire_on_commit=False,
         )
+        if (
+            config.ai.enabled
+            and config.ai.project_limits_verified
+            and config.ai.api_key
+        ):
+            gemini_client = GeminiClient(
+                config.ai.api_key,
+                config.ai.model,
+                config.ai.timeout_seconds,
+            )
+        elif config.ai.enabled and not config.ai.project_limits_verified:
+            logger.warning(
+                "Gemini is configured as enabled but project/model quotas are not verified; "
+                "AI requests are disabled"
+            )
+        elif config.ai.enabled:
+            logger.warning(
+                "Gemini is globally enabled but GEMINI_API_KEY is missing; AI requests are disabled"
+            )
+        ai_gateway = AIGateway(
+            gemini_client,
+            session_factory,
+            config.ai,
+            config.bot.timezone,
+        )
         async with session_factory() as session:
             await mark_past_absences_completed(session, config)
         try:
             async with session_factory() as session:
-                await clean_old_data(session, config.bot.timezone)
+                await clean_old_data(
+                    session,
+                    config.bot.timezone,
+                    activity_retention_days=config.ai.activity_retention_days,
+                    quota_retention_days=config.ai.quota_retention_days,
+                )
         except Exception:
             logger.exception("Стартовая очистка устаревших данных завершилась ошибкой")
         cleanup_task = asyncio.create_task(
-            _daily_cleanup(session_factory, config.bot.timezone)
+            _daily_cleanup(session_factory, config)
         )
 
         bot = Bot(token=config.bot.token)
@@ -135,6 +174,7 @@ async def main() -> None:
         )
         dispatcher = Dispatcher()
         dispatcher["config"] = config
+        dispatcher["ai_gateway"] = ai_gateway
 
         db_middleware = DbSessionMiddleware(session_factory)
         access_middleware = AccessMiddleware()
@@ -157,6 +197,7 @@ async def main() -> None:
         dispatcher.include_router(replacements_router)
         dispatcher.include_router(admin_router)
         dispatcher.include_router(absent_router)
+        dispatcher.include_router(ai_router)
         await dispatcher.start_polling(bot, close_bot_session=False)
     finally:
         background_tasks = [
@@ -169,6 +210,11 @@ async def main() -> None:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         try:
+            if gemini_client is not None:
+                try:
+                    await gemini_client.close()
+                except Exception as exc:
+                    logger.error("Gemini client close failed (%s)", type(exc).__name__)
             if bot is not None:
                 await bot.session.close()
         finally:

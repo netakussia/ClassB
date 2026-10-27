@@ -66,6 +66,11 @@ class EmojiTests(unittest.TestCase):
     def test_button_emoji_is_always_unicode(self) -> None:
         self.assertEqual(emojis.get_btn_emoji("schedule"), "📅")
         self.assertNotIn("<", emojis.get_btn_emoji("schedule"))
+        self.assertEqual(
+            emojis.get_custom_emoji_id("schedule"),
+            "5368324170671202286",
+        )
+        self.assertIsNone(emojis.get_custom_emoji_id("homework"))
 
     def test_button_labels_use_only_configured_unicode_icons(self) -> None:
         self.assertEqual(

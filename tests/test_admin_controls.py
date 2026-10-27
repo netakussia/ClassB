@@ -25,7 +25,11 @@ from config_loader import (
     ScheduleConfig,
     WeekParity,
 )
-from database.migrations import migrate_admin_action_logs, migrate_dynamic_roles
+from database.migrations import (
+    migrate_admin_action_logs,
+    migrate_dynamic_roles,
+    migrate_users,
+)
 from database.models import AdminActionLog, DynamicRole, User
 
 
@@ -60,6 +64,29 @@ class AdminControlsTests(unittest.TestCase):
                 tables = set(inspect(connection).get_table_names())
                 self.assertIn("admin_action_logs", tables)
                 self.assertIn("dynamic_roles", tables)
+            engine.dispose()
+
+    def test_is_banned_migration_is_idempotent_and_defaults_to_false(self) -> None:
+        with NamedTemporaryFile(suffix=".sqlite") as database_file:
+            engine = create_engine(f"sqlite:///{database_file.name}")
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "CREATE TABLE users (telegram_id BIGINT PRIMARY KEY)"
+                )
+                migrate_users(connection)
+                migrate_users(connection)
+                columns = {
+                    column["name"]: column
+                    for column in inspect(connection).get_columns("users")
+                }
+                self.assertIn("is_banned", columns)
+                connection.exec_driver_sql(
+                    "INSERT INTO users (telegram_id) VALUES (10)"
+                )
+                value = connection.exec_driver_sql(
+                    "SELECT is_banned FROM users WHERE telegram_id = 10"
+                ).scalar_one()
+                self.assertEqual(value, 0)
             engine.dispose()
 
     def test_role_middleware_resolves_dynamic_and_yaml_roles(self) -> None:
@@ -144,8 +171,20 @@ class AdminControlsTests(unittest.TestCase):
             for row in admin_menu_keyboard("moderator").inline_keyboard
             for button in row
         }
-        self.assertIn("👥 Управление администраторами", owner_buttons)
+        self.assertIn("Управление администраторами", owner_buttons)
         self.assertNotIn("👥 Управление администраторами", moderator_buttons)
+        self.assertIn("Добавить ДЗ", moderator_buttons)
+        self.assertIn("Замена уроков", moderator_buttons)
+        self.assertEqual(len(moderator_buttons), 3)
+
+        starosta_buttons = {
+            button.text
+            for row in admin_menu_keyboard("starosta").inline_keyboard
+            for button in row
+        }
+        self.assertTrue(any("Управление банами" in text for text in starosta_buttons))
+        self.assertTrue(any("Сокращённые уроки" in text for text in starosta_buttons))
+        self.assertNotIn("Создать рассылку", starosta_buttons)
 
     def test_management_handler_rejects_non_owner_without_querying(self) -> None:
         async def run_test() -> None:

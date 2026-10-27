@@ -105,6 +105,49 @@ class HomeworkEdgeCaseTests(unittest.TestCase):
         subjects = asyncio.run(_subjects_for_homework_date(_Session([old_override, new_override]), target, self.config))
         self.assertEqual(subjects[0], "Тестовый предмет")
 
+    def test_wednesday_fourth_pair_replacement_replaces_programming_in_homework_picker(self) -> None:
+        target = date(2026, 10, 28)
+        wednesday_lessons = [
+            Lesson("11:40", "Л. лит. рум.", "214", "Преподаватель"),
+            Lesson("13:20", "Программирование", "229", "Преподаватель"),
+            Lesson("15:00", "Французский", "208", "Преподаватель"),
+        ]
+        schedule = ScheduleConfig(
+            week_parity=self.config.schedule.week_parity,
+            monday=self.config.schedule.monday,
+            tuesday=self.config.schedule.tuesday,
+            wednesday=DaySchedule(odd=wednesday_lessons, even=wednesday_lessons),
+            thursday=self.config.schedule.thursday,
+            friday=self.config.schedule.friday,
+        )
+        config = AppConfig(
+            bot=self.config.bot,
+            roles=self.config.roles,
+            students=self.config.students,
+            students_path=self.config.students_path,
+            sanctions=self.config.sanctions,
+            schedule=schedule,
+        )
+        replacement = ScheduleOverride(
+            target_date=target,
+            lesson_number=4,
+            override_type="lesson",
+            new_subject="Архитектура",
+            new_room="202",
+            new_teacher=None,
+            created_by=1,
+            created_at=datetime.now(timezone.utc),
+        )
+
+        subjects = asyncio.run(
+            _subjects_for_homework_date(_Session([replacement]), target, config)
+        )
+
+        self.assertEqual(
+            subjects,
+            ["Л. лит. рум.", "Архитектура", "Французский"],
+        )
+
     def test_unknown_subject_stops_search_after_bounded_window(self) -> None:
         session = _Session([])
         result = asyncio.run(_next_lesson_date(session, "Несуществующий предмет", self.config, date(2026, 9, 26)))
@@ -153,6 +196,58 @@ class HomeworkEdgeCaseTests(unittest.TestCase):
 
         self.assertEqual(today_target, date(2026, 9, 28))
         self.assertEqual(next_target, date(2026, 9, 29))
+
+    def test_homework_target_uses_slot_number_for_shortened_wednesday_last_pair(self) -> None:
+        target = date(2026, 10, 28)
+        wednesday_lessons = [
+            Lesson("11:40", "Литература", "214", "Преподаватель"),
+            Lesson("13:20", "Программирование", "229", "Преподаватель"),
+            Lesson("15:00", "Французский", "208", "Преподаватель"),
+        ]
+        schedule = ScheduleConfig(
+            week_parity=self.config.schedule.week_parity,
+            monday=self.config.schedule.monday,
+            tuesday=self.config.schedule.tuesday,
+            wednesday=DaySchedule(odd=wednesday_lessons, even=wednesday_lessons),
+            thursday=DaySchedule(
+                odd=[Lesson("08:00", "Следующий предмет", "101", "Преподаватель")],
+                even=[Lesson("08:00", "Следующий предмет", "101", "Преподаватель")],
+            ),
+            friday=self.config.schedule.friday,
+        )
+        config = AppConfig(
+            bot=self.config.bot,
+            roles=self.config.roles,
+            students=self.config.students,
+            students_path=self.config.students_path,
+            sanctions=self.config.sanctions,
+            schedule=schedule,
+        )
+
+        class Session:
+            async def scalars(self, statement):
+                model = statement.column_descriptions[0]["entity"]
+                if model is ScheduleTimeOverride:
+                    return [
+                        ScheduleTimeOverride(
+                            target_date=target,
+                            lesson_number=5,
+                            duration_minutes=30,
+                            big_break_minutes=None,
+                            created_at=datetime(2026, 10, 27, tzinfo=timezone.utc),
+                        )
+                    ]
+                return []
+
+        actual = asyncio.run(
+            homework_target_date(
+                Session(),
+                config,
+                datetime(2026, 10, 28, 15, 45, tzinfo=ZoneInfo("Europe/Chisinau")),
+            )
+        )
+
+        self.assertEqual(actual, date(2026, 10, 29))
 
     def test_telegram_limit_is_realistic_for_long_homework(self) -> None:
         self.assertGreater(TELEGRAM_TEXT_LIMIT, 3500)

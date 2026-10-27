@@ -6,8 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.utils.schedule_parser import WEEKDAYS
-from bot.utils.schedule_parser import parse_schedule
+from bot.utils.schedule_parser import WEEKDAYS, lesson_numbers_for_day, parse_schedule
 from bot.utils.time_utils import calculate_lesson_times, get_configured_week_parity
 from config_loader import AppConfig
 from database.models import ScheduleOverride, ScheduleTimeOverride
@@ -28,25 +27,34 @@ async def subjects_for_date(
         if target_date.weekday() < len(WEEKDAYS)
         else []
     )
+    base_slots = (
+        lesson_numbers_for_day(base_lessons, schedule)
+        if base_lessons
+        else []
+    )
     overrides = await session.scalars(
         select(ScheduleOverride)
         .where(ScheduleOverride.target_date == target_date)
         .order_by(ScheduleOverride.lesson_number, ScheduleOverride.id)
     )
     replacements = {item.lesson_number: item for item in overrides}
+    lessons_by_slot: dict[int, list[str]] = {}
+    for slot, lesson in zip(base_slots, base_lessons):
+        lessons_by_slot.setdefault(slot, []).append(lesson.subject)
     resolved: list[str] = []
-    for number in range(1, max(len(base_lessons), max(replacements, default=0)) + 1):
+    slots = sorted(set(lessons_by_slot) | set(replacements))
+    for number in slots:
         override = replacements.get(number)
         if override is not None and override.is_cancelled:
             continue
-        base_subject = base_lessons[number - 1].subject if number <= len(base_lessons) else None
-        subject = (
-            override.new_subject
-            if override is not None and override.override_type == "lesson" and override.new_subject
-            else base_subject
-        )
-        if subject:
-            resolved.append(subject)
+        if (
+            override is not None
+            and override.override_type == "lesson"
+            and override.new_subject
+        ):
+            resolved.append(override.new_subject)
+        else:
+            resolved.extend(lessons_by_slot.get(number, []))
     return list(dict.fromkeys(resolved))
 
 
@@ -93,6 +101,7 @@ async def homework_target_date(
         weekday = WEEKDAYS[today.weekday()]
         parity = await get_configured_week_parity(session, today, config)
         lessons = config.schedule.lessons_for(weekday, parity)
+        lesson_numbers = lesson_numbers_for_day(lessons, config.schedule)
         overrides = await session.scalars(
             select(ScheduleOverride)
             .where(ScheduleOverride.target_date == today)
@@ -101,7 +110,7 @@ async def homework_target_date(
         latest_overrides = {item.lesson_number: item for item in overrides}
         active_lesson_numbers = [
             number
-            for number in range(1, len(lessons) + 1)
+            for number in lesson_numbers
             if not (
                 latest_overrides.get(number)
                 and latest_overrides[number].is_cancelled
@@ -116,9 +125,14 @@ async def homework_target_date(
             (lesson.time for lesson in lessons),
             config.schedule.lesson_duration_minutes,
             time_overrides,
+            lesson_numbers=lesson_numbers,
         )
+        end_by_slot = {
+            number: time.fromisoformat(clock.end)
+            for number, clock in zip(lesson_numbers, clocks)
+        }
         active_ends = [
-            time.fromisoformat(clocks[number - 1].end)
+            end_by_slot[number]
             for number in active_lesson_numbers
         ]
         if not active_ends:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import date, datetime
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine, inspect, text
 import yaml
@@ -13,12 +14,24 @@ from bot.handlers.schedule import (
     _lesson_subgroup,
     _parse_target_date,
     _personalized_lessons,
+    show_next_schedule,
     _weekend_easter_egg,
 )
 from bot.handlers.replacements import _parse_short_date
 from bot.utils.time_utils import parse_day_month_date
-from config_loader import Lesson, load_config
+from config_loader import (
+    AppConfig,
+    BotConfig,
+    DaySchedule,
+    Lesson,
+    RolesConfig,
+    SanctionsConfig,
+    ScheduleConfig,
+    WeekParity,
+    load_config,
+)
 from database.migrations import migrate_users
+from database.models import User
 
 
 def _lesson(time: str, subject: str, subgroup: str | None = None) -> Lesson:
@@ -82,6 +95,66 @@ class SchedulePersonalizationTests(unittest.TestCase):
 
         self.assertEqual(rows, [(1, None)])
 
+    def test_schedule_free_window_uses_non_contiguous_timetable_slot(self) -> None:
+        early_lessons = [
+            _lesson("08:00", "First"),
+            _lesson("09:40", "Second"),
+        ]
+        wednesday_lessons = [
+            _lesson("11:40", "Common"),
+            _lesson("13:20", "L. franceză"),
+            _lesson("15:00", "L. engleză"),
+        ]
+        config = AppConfig(
+            bot=BotConfig(
+                token="test-token",
+                timezone="Europe/Chisinau",
+                group_chat_id=0,
+            ),
+            roles=RolesConfig(owner=[], starosta=[], moderators=[]),
+            students=[],
+            students_path=Path("students.yaml"),
+            sanctions=SanctionsConfig(ban_threshold=3, ban_days=0),
+            schedule=ScheduleConfig(
+                week_parity=WeekParity(date(2026, 9, 28), "odd"),
+                monday=DaySchedule(odd=early_lessons, even=early_lessons),
+                tuesday=DaySchedule(odd=[], even=[]),
+                wednesday=DaySchedule(
+                    odd=wednesday_lessons,
+                    even=wednesday_lessons,
+                ),
+                thursday=DaySchedule(odd=[], even=[]),
+                friday=DaySchedule(odd=[], even=[]),
+            ),
+        )
+
+        class Session:
+            async def get(self, model, key):
+                return User(telegram_id=key, subgroup="english") if model is User else None
+
+            async def scalars(self, statement):
+                return []
+
+        message = AsyncMock()
+        with patch(
+            "bot.handlers.schedule.get_configured_week_parity",
+            new=AsyncMock(return_value="odd"),
+        ):
+            asyncio.run(
+                show_next_schedule(
+                    message,
+                    config,
+                    Session(),
+                    target_date=date(2026, 10, 28),
+                    telegram_id=123,
+                    display_name="Student",
+                )
+            )
+
+        text = message.answer.await_args.args[0]
+        self.assertIn("Свободное окно", text)
+        self.assertIn("13:20", text)
+
     def test_explicit_subgroup_marker_is_supported(self) -> None:
         lesson = _lesson("11:40", "Language", "french")
         self.assertEqual(_lesson_subgroup(lesson), "french")
@@ -143,12 +216,18 @@ class SchedulePersonalizationTests(unittest.TestCase):
                 self.assertIn("subgroup", columns)
                 self.assertIn("last_action", columns)
                 self.assertIn("last_active_at", columns)
+                self.assertIn("is_banned", columns)
                 self.assertTrue(columns["subgroup"]["nullable"])
                 self.assertTrue(columns["last_action"]["nullable"])
                 self.assertTrue(columns["last_active_at"]["nullable"])
+                self.assertFalse(columns["is_banned"]["nullable"])
                 self.assertEqual(
                     connection.scalar(text("SELECT telegram_id FROM users")),
                     123,
+                )
+                self.assertEqual(
+                    connection.scalar(text("SELECT is_banned FROM users")),
+                    0,
                 )
 
 

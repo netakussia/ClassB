@@ -20,8 +20,58 @@ class User(Base):
     subgroup: Mapped[str | None] = mapped_column(String, nullable=True)
     last_action: Mapped[str | None] = mapped_column(String, nullable=True)
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_banned: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     false_absences_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AIUserSettings(Base):
+    __tablename__ = "ai_user_settings"
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    gemini_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    humor_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    personalization_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    reactions_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    humor_style: Mapped[str] = mapped_column(String, default="memey", server_default="memey", nullable=False)
+
+
+class AIActivityDaily(Base):
+    __tablename__ = "ai_activity_daily"
+    __table_args__ = (
+        UniqueConstraint("telegram_id", "activity_date", "category", name="uq_ai_activity_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    activity_date: Mapped[date] = mapped_column(Date, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+
+
+class AIRecentResponse(Base):
+    __tablename__ = "ai_recent_responses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    response_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AIQuotaCounter(Base):
+    __tablename__ = "ai_quota_counters"
+    __table_args__ = (
+        UniqueConstraint("scope", "scope_id", "window", "window_start", name="uq_ai_quota_bucket"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    window: Mapped[str] = mapped_column(String, nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
 
 class Homework(Base):

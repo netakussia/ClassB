@@ -25,6 +25,8 @@ def calculate_lesson_times(
     lesson_start_times: Iterable[str],
     default_duration_minutes: int,
     overrides: Iterable[ScheduleTimeOverride] = (),
+    *,
+    lesson_numbers: Iterable[int] | None = None,
 ) -> list[LessonClock]:
     """Calculate lesson start/end times while preserving the configured breaks."""
     if default_duration_minutes <= 0:
@@ -37,6 +39,24 @@ def calculate_lesson_times(
             starts.append(datetime.combine(date.min, time.fromisoformat(start_text)))
         except ValueError as exc:
             raise ValueError(f"Invalid lesson start time: {value}") from exc
+
+    slot_numbers = list(lesson_numbers) if lesson_numbers is not None else list(
+        range(1, len(starts) + 1)
+    )
+    if len(slot_numbers) != len(starts) or any(number <= 0 for number in slot_numbers):
+        raise ValueError("lesson_numbers must contain one positive slot number per lesson")
+
+    start_by_slot: dict[int, datetime] = {}
+    unique_slots: list[int] = []
+    unique_starts: list[datetime] = []
+    for slot, start in zip(slot_numbers, starts):
+        if slot in start_by_slot:
+            if start_by_slot[slot] != start:
+                raise ValueError("A timetable slot cannot have multiple start times")
+            continue
+        start_by_slot[slot] = start
+        unique_slots.append(slot)
+        unique_starts.append(start)
 
     override_rows = list(overrides)
     global_override = next(
@@ -51,7 +71,7 @@ def calculate_lesson_times(
     default_duration = timedelta(minutes=default_duration_minutes)
     durations: list[timedelta] = []
     shortened: list[bool] = []
-    for lesson_number in range(1, len(starts) + 1):
+    for lesson_number in unique_slots:
         specific_override = specific_overrides.get(lesson_number)
         duration_minutes = (
             specific_override.duration_minutes
@@ -74,8 +94,11 @@ def calculate_lesson_times(
         None,
     )
     gaps = [
-        max(timedelta(0), starts[index + 1] - starts[index] - default_duration)
-        for index in range(max(0, len(starts) - 1))
+        max(
+            timedelta(0),
+            unique_starts[index + 1] - unique_starts[index] - default_duration,
+        )
+        for index in range(max(0, len(unique_starts) - 1))
     ]
     if big_break_minutes is not None:
         if big_break_minutes < 0:
@@ -84,7 +107,7 @@ def calculate_lesson_times(
             gaps[1] = timedelta(minutes=big_break_minutes)
 
     result: list[LessonClock] = []
-    current_start = starts[0] if starts else None
+    current_start = unique_starts[0] if unique_starts else None
     for index, duration in enumerate(durations):
         assert current_start is not None
         current_end = current_start + duration
@@ -97,7 +120,8 @@ def calculate_lesson_times(
         )
         if index + 1 < len(durations):
             current_start = current_end + gaps[index]
-    return result
+    clock_by_slot = dict(zip(unique_slots, result))
+    return [clock_by_slot[slot] for slot in slot_numbers]
 
 
 def get_next_school_day(timezone: str) -> date:

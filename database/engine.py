@@ -28,7 +28,12 @@ DEFAULT_DATABASE_URL = URL.create(
     database=str(DATA_DIR / "bot.db"),
 )
 DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
-async_engine: AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
+_connect_args = {"timeout": 30} if str(DATABASE_URL).startswith("sqlite") else {}
+async_engine: AsyncEngine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args=_connect_args,
+)
 
 
 async def init_db() -> None:

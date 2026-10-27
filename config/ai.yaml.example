@@ -1,0 +1,26 @@
+# Gemini remains disabled until the chosen model's live project quotas are verified.
+enabled: false
+project_limits_verified: false
+humor_enabled: false
+personalization_enabled: false
+reactions_enabled: false
+model: "gemini-3.5-flash-lite"
+
+user_daily_limit: 25
+user_per_minute_limit: 3
+# Set project limits no higher than the current Google AI Studio project/model quota.
+global_daily_limit: 100
+global_per_minute_limit: 10
+global_tokens_per_minute: 10000
+# Extra allowance for the fixed system prompt and tokenizer variance; input/output are added.
+prompt_token_reserve: 512
+max_input_chars: 500
+joke_max_output_tokens: 120
+timeout_seconds: 15
+retries: 1
+personalization_cache_hours: 5
+joke_repeat_window_minutes: 30
+activity_retention_days: 30
+quota_retention_days: 31
+
+# Set GEMINI_API_KEY in the process environment; never put the key in this file.

@@ -22,7 +22,11 @@ from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import MenuCallback, add_cancel_button, menu_back_keyboard
 from bot.utils.admin_audit import log_admin_action
 from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
-from bot.utils.schedule_parser import WEEKDAYS, parse_schedule
+from bot.utils.schedule_parser import (
+    WEEKDAYS,
+    lesson_numbers_for_day,
+    parse_schedule,
+)
 from bot.utils.subjects import all_subjects
 from bot.utils.time_utils import get_configured_week_parity, parse_day_month_date
 from config_loader import AppConfig, Lesson
@@ -204,6 +208,22 @@ async def _lessons_for_date(
     schedule = parse_schedule(config.schedule)
     parity = await get_configured_week_parity(session, target_date, config)
     return schedule.lessons_for(WEEKDAYS[weekday], parity)
+
+
+def _lesson_for_slot(
+    lessons: list[Lesson],
+    lesson_number: int,
+    config: AppConfig,
+) -> Lesson | None:
+    slot_numbers = lesson_numbers_for_day(lessons, config.schedule)
+    return next(
+        (
+            lesson
+            for slot, lesson in zip(slot_numbers, lessons)
+            if slot == lesson_number
+        ),
+        None,
+    )
 
 
 async def _ask_for_lesson(
@@ -419,11 +439,8 @@ async def replace_type_handler(
         await state.clear()
         target_date = date.fromisoformat(target_date_value)
         lessons = await _lessons_for_date(target_date, config, session)
-        subject = (
-            lessons[lesson_number - 1].subject
-            if lesson_number <= len(lessons)
-            else "Предмет не указан"
-        )
+        base_lesson = _lesson_for_slot(lessons, lesson_number, config)
+        subject = base_lesson.subject if base_lesson is not None else "Предмет не указан"
         notification = (
             f"{get_emoji('cancel_lesson')} Замена на {target_date:%d.%m.%Y}\n"
             f"Предмет: {html.escape(subject)}\n"
@@ -571,7 +588,7 @@ async def replace_data_handler(
         await state.clear()
         await message.answer("Расписание недоступно. Начни ещё раз из меню.", reply_markup=menu_back_keyboard())
         return
-    base_lesson = lessons[lesson_number - 1] if lesson_number <= len(lessons) else None
+    base_lesson = _lesson_for_slot(lessons, lesson_number, config)
 
     new_subject: str | None = None
     new_room: str

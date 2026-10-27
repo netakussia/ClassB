@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.keyboards.reply import main_reply_keyboard
+from bot.keyboards.reply import DOCUMENTS_BUTTON_TEXT, main_reply_keyboard
 from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import (
     ADMIN_ROLES,
@@ -89,7 +89,7 @@ async def show_document_categories(message: Message) -> None:
 
 
 @router.message(Command("docs"))
-@router.message(F.text == f"{get_btn_emoji('documents')} Документы")
+@router.message(F.text == DOCUMENTS_BUTTON_TEXT)
 async def documents_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     await show_document_categories(message)
@@ -130,7 +130,10 @@ async def browse_category_handler(
                 style="primary",
             )
     keyboard.button(
-        text=f"« {get_btn_emoji('back_categories')} Назад в категории",
+        text=get_button_label(
+            "« Назад в категории",
+            icon_key="back_categories",
+        ),
         callback_data=DocumentCallback(action="categories", value="").pack(),
     )
     keyboard.button(

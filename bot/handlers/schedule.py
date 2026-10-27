@@ -15,12 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.keyboards.inline import InlineKeyboardBuilder
 from bot.ui import menu_back_keyboard
 from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
-from bot.utils.schedule_parser import WEEKDAYS, Lesson, parse_schedule
+from bot.utils.schedule_parser import (
+    WEEKDAYS,
+    Lesson,
+    lesson_numbers_for_day,
+    parse_schedule,
+)
 from bot.utils.time_utils import (
     calculate_lesson_times,
     get_configured_week_parity,
-    get_next_school_day,
 )
+from bot.utils.homework_dates import homework_target_date
 from config_loader import AppConfig
 from database.models import ScheduleOverride, ScheduleTimeOverride, User
 
@@ -93,11 +98,13 @@ def _lesson_subgroup(lesson: Lesson) -> str | None:
 def _personalized_lessons(
     lessons: list[Lesson],
     subgroup: str | None,
+    lesson_numbers: list[int] | None = None,
 ) -> list[tuple[int, Lesson | None]]:
     """Return schedule rows, using a None lesson for parallel-group free time."""
     rows: list[tuple[int, Lesson | None]] = []
     free_times: set[str] = set()
-    for index, lesson in enumerate(lessons, start=1):
+    numbers = lesson_numbers or list(range(1, len(lessons) + 1))
+    for index, lesson in zip(numbers, lessons):
         lesson_subgroup = _lesson_subgroup(lesson)
         if subgroup is None or lesson_subgroup is None or lesson_subgroup == subgroup:
             rows.append((index, lesson))
@@ -217,7 +224,14 @@ async def show_next_schedule(
             parse_mode=ParseMode.HTML,
         )
         return
-    target_date = target_date or get_next_school_day(config.bot.timezone)
+    if target_date is None:
+        target_date = await homework_target_date(session, config, now)
+        if target_date is None:
+            await message.answer(
+                "Не удалось найти ближайший учебный день в расписании.",
+                reply_markup=menu_back_keyboard(),
+            )
+            return
 
     if telegram_id is None and message.from_user is not None:
         telegram_id = message.from_user.id
@@ -256,6 +270,7 @@ async def show_next_schedule(
         "saturday" if target_date.weekday() == 5 else "sunday"
     )
     lessons = schedule.lessons_for(weekday, parity) if weekday in WEEKDAYS else []
+    lesson_numbers = lesson_numbers_for_day(lessons, schedule)
 
     result = await session.scalars(
         select(ScheduleOverride)
@@ -275,10 +290,12 @@ async def show_next_schedule(
             (lesson.time for lesson in lessons),
             config.schedule.lesson_duration_minutes,
             time_overrides,
+            lesson_numbers=lesson_numbers,
         )
         if time_overrides
         else []
     )
+    clocks_by_slot = dict(zip(lesson_numbers, lesson_clocks))
 
     lines = [
         greeting,
@@ -288,22 +305,24 @@ async def show_next_schedule(
     if time_overrides:
         lines.append(f"{get_emoji('warning')} Внимание! В этот день уроки сокращены!")
     lines.append("━━━━━━━━━━━━━━━━")
-    schedule_rows = dict(_personalized_lessons(lessons, subgroup))
+    base_lessons_by_slot: dict[int, Lesson] = {}
+    for lesson_number, lesson in zip(lesson_numbers, lessons):
+        base_lessons_by_slot.setdefault(lesson_number, lesson)
+    schedule_rows = dict(
+        _personalized_lessons(lessons, subgroup, lesson_numbers)
+    )
     placeholder = Lesson(time="—", subject="—", room="—", teacher="—")
     for lesson_number, override in overrides.items():
         if override.is_cancelled:
-            schedule_rows[lesson_number] = (
-                lessons[lesson_number - 1]
-                if lesson_number <= len(lessons)
-                else placeholder
+            schedule_rows[lesson_number] = base_lessons_by_slot.get(
+                lesson_number,
+                placeholder,
             )
-        elif lesson_number > len(lessons):
+        elif lesson_number not in base_lessons_by_slot:
             schedule_rows[lesson_number] = placeholder
     for lesson_number, lesson in sorted(schedule_rows.items()):
         clock = (
-            lesson_clocks[lesson_number - 1]
-            if lesson_clocks and lesson_number <= len(lesson_clocks)
-            else None
+            clocks_by_slot.get(lesson_number)
         )
         display_time = (
             f"{clock.start}–{clock.end}"
@@ -311,7 +330,11 @@ async def show_next_schedule(
             else lesson.time if lesson is not None else None
         )
         if lesson is None:
-            free_time = display_time or lessons[lesson_number - 1].time
+            base_lesson = base_lessons_by_slot.get(lesson_number)
+            free_time = (
+                display_time
+                or (base_lesson.time if base_lesson is not None else "—")
+            )
             lines.append(
                 f"• [{free_time}] Свободное окно {get_emoji('free_slot')} "
                 "(у параллельной подгруппы пара)"
