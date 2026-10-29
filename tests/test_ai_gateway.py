@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
 import httpx
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.ai.gateway import (
     AIGateway,
+    MAX_TOTAL_REQUEST_SECONDS,
     _project_day_start,
     _user_day_start,
     reserve_quota,
@@ -56,6 +57,16 @@ class FakeGenerator:
 class AIGatewayTests(unittest.TestCase):
     def _run(self, async_test) -> None:
         asyncio.run(async_test())
+
+    def test_total_deadline_preserves_both_configured_attempt_windows(self) -> None:
+        config = AIConfig(timeout_seconds=15, retries=1)
+        total_budget = min(
+            config.timeout_seconds * (config.retries + 1),
+            MAX_TOTAL_REQUEST_SECONDS,
+        )
+
+        self.assertEqual(MAX_TOTAL_REQUEST_SECONDS, 30)
+        self.assertEqual(total_budget, 30)
 
     def test_concurrent_users_cannot_exceed_project_daily_limit(self) -> None:
         async def test() -> None:
@@ -354,6 +365,66 @@ class AIGatewayTests(unittest.TestCase):
                     )
                     self.assertEqual(user_daily_count, 2)
                     self.assertEqual(project_daily_count, 2)
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_total_deadline_stops_retries_and_returns_fallback_result(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'total-deadline.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+                class SlowGenerator:
+                    def __init__(self) -> None:
+                        self.calls = 0
+
+                    async def generate(
+                        self,
+                        user_text: str,
+                        *,
+                        max_output_tokens: int,
+                        humor_style: str,
+                    ) -> str:
+                        self.calls += 1
+                        await asyncio.sleep(0.5)
+                        return '{"intent":"ordinary_reply","response":"Понял."}'
+
+                generator = SlowGenerator()
+                gateway = AIGateway(
+                    generator,
+                    factory,
+                    AIConfig(
+                        enabled=True,
+                        project_limits_verified=True,
+                        timeout_seconds=1,
+                        retries=1,
+                    ),
+                    "Europe/Chisinau",
+                )
+                with (
+                    patch("bot.ai.gateway.MAX_TOTAL_REQUEST_SECONDS", 0.2),
+                    self.assertLogs("bot.ai.gateway", level="WARNING") as captured,
+                ):
+                    result = await gateway.generate(888, "hello", allow_humor=False)
+
+                self.assertIsNone(result)
+                self.assertEqual(generator.calls, 1)
+                self.assertIn("total request deadline exceeded", captured.output[-1])
+                async with factory() as session:
+                    daily_count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "user",
+                            AIQuotaCounter.scope_id == "888",
+                            AIQuotaCounter.window == "day",
+                        )
+                    )
+                self.assertEqual(daily_count, 1)
                 await engine.dispose()
 
         self._run(test)

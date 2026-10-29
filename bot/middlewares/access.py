@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 import logging
+from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -357,12 +358,14 @@ class AccessMiddleware(BaseMiddleware):
         if not isinstance(session, AsyncSession):
             raise RuntimeError("AsyncSession was not provided in dispatcher workflow data")
 
+        middleware_started = monotonic()
         telegram_user = getattr(event, "from_user", None)
         telegram_id = getattr(telegram_user, "id", None)
         if not isinstance(telegram_id, int):
             return await handler(event, data)
 
         student = self._student(config, telegram_id)
+        db_lookup_started = monotonic()
         dynamic_role = await session.get(DynamicRole, telegram_id)
         has_dynamic_role = dynamic_role is not None and dynamic_role.role in {
             "starosta",
@@ -377,6 +380,7 @@ class AccessMiddleware(BaseMiddleware):
             return None
 
         user = await session.get(User, telegram_id)
+        db_lookup_ms = int((monotonic() - db_lookup_started) * 1000)
         if user is None:
             user = User(telegram_id=telegram_id)
             session.add(user)
@@ -419,6 +423,7 @@ class AccessMiddleware(BaseMiddleware):
             else None
         )
         if event_chat is not None and event_chat.type == "private":
+            activity_started = monotonic()
             await _record_ai_activity(
                 session,
                 event,
@@ -426,6 +431,25 @@ class AccessMiddleware(BaseMiddleware):
                 config,
                 data.get("raw_state"),
             )
+            activity_ms = int((monotonic() - activity_started) * 1000)
+        else:
+            activity_ms = 0
+        commit_started = monotonic()
         await session.commit()
+        commit_ms = int((monotonic() - commit_started) * 1000)
         data["student"] = student
-        return await handler(event, data)
+        handler_started = monotonic()
+        try:
+            return await handler(event, data)
+        finally:
+            handler_ms = int((monotonic() - handler_started) * 1000)
+            logger.info(
+                "Access update timings event_type=%s db_lookup_ms=%d "
+                "activity_ms=%d commit_ms=%d handler_ms=%d total_ms=%d",
+                "callback" if isinstance(event, CallbackQuery) else "message",
+                db_lookup_ms,
+                activity_ms,
+                commit_ms,
+                handler_ms,
+                int((monotonic() - middleware_started) * 1000),
+            )

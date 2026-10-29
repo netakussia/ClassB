@@ -156,6 +156,39 @@ class DocsInlineTests(unittest.IsolatedAsyncioTestCase):
             "documents",
         )
 
+    async def test_home_callback_edits_menu_without_waiting_for_ai_greeting(self) -> None:
+        message = SimpleNamespace(
+            chat=SimpleNamespace(type="private"),
+            edit_text=AsyncMock(),
+        )
+        callback = SimpleNamespace(
+            answer=AsyncMock(),
+            message=message,
+            from_user=SimpleNamespace(id=123, full_name="Test & User"),
+        )
+        state = SimpleNamespace(clear=AsyncMock())
+        gateway = AsyncMock()
+        with patch(
+            "bot.handlers.base.personalized_greeting",
+            new=AsyncMock(),
+        ) as personalized:
+            await menu_callback_handler(
+                callback,
+                MenuCallback(action="home"),
+                state,
+                role="user",
+                config=SimpleNamespace(),
+                session=SimpleNamespace(),
+                ai_gateway=gateway,
+            )
+
+        state.clear.assert_awaited_once()
+        callback.answer.assert_awaited_once()
+        message.edit_text.assert_awaited_once()
+        self.assertIn("Привет, Test &amp; User!", message.edit_text.await_args.args[0])
+        personalized.assert_not_awaited()
+        gateway.generate.assert_not_awaited()
+
     async def test_admin_menu_uses_blue_for_actions_and_neutral_for_back(self) -> None:
         buttons = _buttons(admin_menu_keyboard("owner"))
 

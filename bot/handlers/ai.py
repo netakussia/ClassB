@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, MessageEntity
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.ai.gateway import AIGateway
@@ -21,6 +23,41 @@ from database.models import AIUserSettings
 
 logger = logging.getLogger(__name__)
 router = Router(name="ai")
+AI_THINKING_TEXT = "Думаю 🙂"
+AI_THINKING_CUSTOM_EMOJI_ID = "5427181942934088912"
+
+
+async def _send_thinking_indicator(
+    message: Message,
+    custom_emoji_id: str | None = AI_THINKING_CUSTOM_EMOJI_ID,
+) -> Message | None:
+    if custom_emoji_id:
+        try:
+            return await message.answer(
+                AI_THINKING_TEXT,
+                entities=[
+                    MessageEntity(
+                        type="custom_emoji",
+                        offset=6,
+                        length=2,
+                        custom_emoji_id=custom_emoji_id,
+                    )
+                ],
+            )
+        except TelegramAPIError as exc:
+            logger.warning(
+                "Could not send AI thinking indicator with custom emoji (%s)",
+                type(exc).__name__,
+            )
+
+    try:
+        return await message.answer(AI_THINKING_TEXT)
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Could not send plain AI thinking indicator (%s)",
+            type(exc).__name__,
+        )
+        return None
 
 
 class AISettingsCallback(CallbackData, prefix="aiset"):
@@ -193,26 +230,67 @@ async def private_text_handler(
         or not config.ai.api_key
     ):
         return
-    result = await ai_gateway.generate(
-        message.from_user.id,
-        message.text,
-        allow_humor=config.ai.humor_enabled and settings.humor_enabled,
-        humor_style=settings.humor_style,
-    )
-    if result is None:
-        await message.answer("Сейчас не удалось получить ответ от AI. Обычные разделы бота работают.")
-        return
-    if result.intent == "bot_question":
-        await message.answer(
-            "Я показываю домашние задания, расписание, документы, заявки и подгруппу. "
-            "Открой /help, чтобы посмотреть разделы."
-        )
-    elif result.intent.startswith("navigation_"):
-        logger.info(
-            "Ignored model navigation intent without an explicit local navigation request "
-            "intent=%s",
-            result.intent,
-        )
-        await message.answer("Не до конца понял вопрос. Попробуй сформулировать иначе.")
-    elif result.intent in {"ordinary_reply", "joke_or_banter"} and result.response:
-        await message.answer(result.response)
+    thinking_message = None
+    response_delivered = False
+    cancelled = False
+    try:
+        thinking_message = await _send_thinking_indicator(message)
+
+        try:
+            result = await ai_gateway.generate(
+                message.from_user.id,
+                message.text,
+                allow_humor=config.ai.humor_enabled and settings.humor_enabled,
+                humor_style=settings.humor_style,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("AI request failed in handler (%s)", type(exc).__name__)
+            result = None
+
+        if result is None:
+            response_text = (
+                "Сейчас не удалось получить ответ от AI. "
+                "Обычные разделы бота работают."
+            )
+        elif result.intent == "bot_question":
+            response_text = (
+                "Я показываю домашние задания, расписание, документы, заявки и подгруппу. "
+                "Открой /help, чтобы посмотреть разделы."
+            )
+        elif result.intent.startswith("navigation_"):
+            logger.info(
+                "Ignored model navigation intent without an explicit local navigation request "
+                "intent=%s",
+                result.intent,
+            )
+            response_text = "Не до конца понял вопрос. Попробуй сформулировать иначе."
+        elif result.intent in {"ordinary_reply", "joke_or_banter"} and result.response:
+            response_text = result.response
+        else:
+            response_text = "Не до конца понял вопрос. Попробуй сформулировать иначе."
+
+        try:
+            await message.answer(response_text)
+            response_delivered = True
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except TelegramAPIError as exc:
+            logger.warning(
+                "Could not send AI final response (%s)",
+                type(exc).__name__,
+            )
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        if thinking_message is not None and (response_delivered or cancelled):
+            try:
+                await thinking_message.delete()
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "Could not remove AI thinking indicator (%s)",
+                    type(exc).__name__,
+                )

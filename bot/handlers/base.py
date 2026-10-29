@@ -305,23 +305,7 @@ async def menu_callback_handler(
     if action == "home":
         await state.clear()
         await callback.answer()
-        display_name = await _greeting_name(
-            session,
-            callback.from_user.id,
-            callback.from_user.full_name,
-        )
-        greeting = (
-            await personalized_greeting(
-                session,
-                callback.from_user.id,
-                config.ai,
-                config.bot.timezone,
-                display_name=display_name,
-                ai_gateway=ai_gateway,
-            )
-            if callback.message.chat.type == "private"
-            else greeting_fallback(display_name)
-        )
+        greeting = greeting_fallback(callback.from_user.full_name)
         await callback.message.edit_text(
             f"{get_emoji('greeting')} {html.escape(greeting)}",
             reply_markup=main_menu_keyboard(role),

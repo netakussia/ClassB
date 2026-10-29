@@ -188,6 +188,25 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(result, "handled")
         self.assertEqual(calls, [True])
 
+    def test_update_timings_log_durations_without_event_or_user_data(self) -> None:
+        with self.assertLogs("bot.middlewares.access", level="INFO") as captured:
+            result, calls = self._invoke(
+                _callback(4, "menu:help"),
+                telegram_id=4,
+                is_banned=False,
+            )
+
+        self.assertEqual(result, "handled")
+        self.assertEqual(calls, [True])
+        output = "\n".join(captured.output)
+        self.assertIn("event_type=callback", output)
+        self.assertIn("db_lookup_ms=", output)
+        self.assertIn("activity_ms=", output)
+        self.assertIn("commit_ms=", output)
+        self.assertIn("handler_ms=", output)
+        self.assertNotIn("menu:help", output)
+        self.assertNotIn("telegram_id", output)
+
     def test_moderator_cannot_continue_starosta_fsm_state(self) -> None:
         with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
             result, calls = self._invoke(

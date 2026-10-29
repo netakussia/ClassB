@@ -28,6 +28,7 @@ from bot.ai.policy import (
 logger = logging.getLogger(__name__)
 PROJECT_QUOTA_TIMEZONE = ZoneInfo("America/Los_Angeles")
 USER_QUOTA_RETRIES = 4
+MAX_TOTAL_REQUEST_SECONDS = 30
 
 
 class QuotaUnavailable(Exception):
@@ -212,92 +213,114 @@ class AIGateway:
                 response="Понял, отвечу без шуток. Если нужен раздел бота, открой /help.",
             )
         bounded_text = truncate_input(user_text, self._config.max_input_chars)
-        async with self._semaphore:
-            max_attempts = self._config.retries + 1
-            for attempt in range(max_attempts):
-                try:
-                    estimated_tokens = (
-                        len(bounded_text.encode("utf-8"))
-                        + self._config.prompt_token_reserve
-                        + self._config.joke_max_output_tokens
-                    )
-                    reserved = await reserve_quota(
-                        self._session_factory,
-                        user_id,
-                        self._config,
-                        self._user_timezone,
-                        estimated_tokens=estimated_tokens,
-                    )
-                except QuotaUnavailable:
-                    return None
-                if not reserved:
-                    return None
-                request_started = monotonic()
-                try:
-                    async with asyncio.timeout(self._config.timeout_seconds):
-                        raw = await self._client.generate(
-                            bounded_text,
-                            max_output_tokens=self._config.joke_max_output_tokens,
-                            humor_style=humor_style if humor_style in {"memey", "gentle"} else "memey",
-                        )
-                except (GeminiTemporaryError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "Gemini temporary failure attempt=%d/%d retrying=%s "
-                        "exception_type=%s elapsed_ms=%d",
-                        attempt + 1,
-                        max_attempts,
-                        attempt + 1 < max_attempts,
-                        type(exc).__name__,
-                        int((monotonic() - request_started) * 1000),
-                    )
-                    if attempt < self._config.retries:
-                        continue
-                    return None
-                except Exception as exc:
-                    logger.warning(
-                        "Gemini request unavailable exception_type=%s elapsed_ms=%d",
-                        type(exc).__name__,
-                        int((monotonic() - request_started) * 1000),
-                    )
-                    return None
+        max_attempts = self._config.retries + 1
+        total_deadline_seconds = min(
+            self._config.timeout_seconds * max_attempts,
+            MAX_TOTAL_REQUEST_SECONDS,
+        )
+        total_started = monotonic()
+        try:
+            async with asyncio.timeout(total_deadline_seconds):
+                async with self._semaphore:
+                    for attempt in range(max_attempts):
+                        try:
+                            estimated_tokens = (
+                                len(bounded_text.encode("utf-8"))
+                                + self._config.prompt_token_reserve
+                                + self._config.joke_max_output_tokens
+                            )
+                            reserved = await reserve_quota(
+                                self._session_factory,
+                                user_id,
+                                self._config,
+                                self._user_timezone,
+                                estimated_tokens=estimated_tokens,
+                            )
+                        except QuotaUnavailable:
+                            return None
+                        if not reserved:
+                            return None
+                        request_started = monotonic()
+                        try:
+                            async with asyncio.timeout(self._config.timeout_seconds):
+                                raw = await self._client.generate(
+                                    bounded_text,
+                                    max_output_tokens=self._config.joke_max_output_tokens,
+                                    humor_style=(
+                                        humor_style
+                                        if humor_style in {"memey", "gentle"}
+                                        else "memey"
+                                    ),
+                                )
+                        except (GeminiTemporaryError, asyncio.TimeoutError) as exc:
+                            logger.warning(
+                                "Gemini temporary failure attempt=%d/%d retrying=%s "
+                                "exception_type=%s elapsed_ms=%d",
+                                attempt + 1,
+                                max_attempts,
+                                attempt + 1 < max_attempts,
+                                type(exc).__name__,
+                                int((monotonic() - request_started) * 1000),
+                            )
+                            if attempt < self._config.retries:
+                                continue
+                            return None
+                        except Exception as exc:
+                            logger.warning(
+                                "Gemini request unavailable exception_type=%s elapsed_ms=%d",
+                                type(exc).__name__,
+                                int((monotonic() - request_started) * 1000),
+                            )
+                            return None
 
-                elapsed_ms = int((monotonic() - request_started) * 1000)
-                logger.info(
-                    "Gemini request completed attempt=%d/%d elapsed_ms=%d",
-                    attempt + 1,
-                    max_attempts,
-                    elapsed_ms,
-                )
-                result = parse_model_result(raw)
-                if result is None:
-                    logger.warning(
-                        "Gemini response failed local validation elapsed_ms=%d",
-                        elapsed_ms,
-                    )
-                    return None
-                if result.intent == "joke_or_banter" and (
-                    not allow_humor or not is_explicit_banter_request(user_text)
-                ):
-                    return AIResult(
-                        intent="ordinary_reply",
-                        response="Могу помочь с вопросами по боту. Открой /help для списка разделов.",
-                    )
-                if result.intent == "joke_or_banter":
-                    try:
-                        if await _is_recent_joke_repeat(
-                            self._session_factory,
-                            user_id,
-                            result.response,
-                            self._config.joke_repeat_window_minutes,
+                        elapsed_ms = int((monotonic() - request_started) * 1000)
+                        logger.info(
+                            "Gemini request completed attempt=%d/%d elapsed_ms=%d",
+                            attempt + 1,
+                            max_attempts,
+                            elapsed_ms,
+                        )
+                        result = parse_model_result(raw)
+                        if result is None:
+                            logger.warning(
+                                "Gemini response failed local validation elapsed_ms=%d",
+                                elapsed_ms,
+                            )
+                            return None
+                        if result.intent == "joke_or_banter" and (
+                            not allow_humor or not is_explicit_banter_request(user_text)
                         ):
                             return AIResult(
                                 intent="ordinary_reply",
-                                response="Похоже, я уже рассказывал эту шутку. Давай сменим тему.",
+                                response=(
+                                    "Могу помочь с вопросами по боту. "
+                                    "Открой /help для списка разделов."
+                                ),
                             )
-                    except QuotaUnavailable:
-                        return None
-                return result
-        return None
+                        if result.intent == "joke_or_banter":
+                            try:
+                                if await _is_recent_joke_repeat(
+                                    self._session_factory,
+                                    user_id,
+                                    result.response,
+                                    self._config.joke_repeat_window_minutes,
+                                ):
+                                    return AIResult(
+                                        intent="ordinary_reply",
+                                        response=(
+                                            "Похоже, я уже рассказывал эту шутку. "
+                                            "Давай сменим тему."
+                                        ),
+                                    )
+                            except QuotaUnavailable:
+                                return None
+                        return result
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Gemini total request deadline exceeded elapsed_ms=%d",
+                int((monotonic() - total_started) * 1000),
+            )
+            return None
 
 
 async def clean_old_quota_counters(
