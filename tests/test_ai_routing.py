@@ -55,13 +55,14 @@ def _config() -> AppConfig:
 
 
 class RoutingSession:
-    def __init__(self) -> None:
+    def __init__(self, *, gemini_enabled: bool = True) -> None:
         self.settings = AIUserSettings(
             telegram_id=45,
-            gemini_enabled=True,
+            gemini_enabled=gemini_enabled,
             humor_enabled=True,
             personalization_enabled=True,
             reactions_enabled=False,
+            humor_style="memey",
         )
 
     async def get(self, model, key):
@@ -153,7 +154,8 @@ class AIRoutingTests(unittest.TestCase):
     def test_explicit_homework_request_uses_existing_handler_without_gemini(self) -> None:
         async def test() -> None:
             bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
-            message = self._message(bot, "private", "Что задали?")
+            message = self._message(bot, "private", "Что задали на завтра?")
+            gateway = AsyncMock(spec=AIGateway)
             with patch(
                 "bot.handlers.ai.show_tomorrow_homework",
                 new_callable=AsyncMock,
@@ -162,9 +164,10 @@ class AIRoutingTests(unittest.TestCase):
                     message,
                     RoutingSession(),
                     _config(),
-                    AsyncMock(spec=AIGateway),
+                    gateway,
                 )
             show_homework.assert_awaited_once()
+            gateway.generate.assert_not_awaited()
             await bot.session.close()
 
     def test_joking_reference_does_not_trigger_random_navigation(self) -> None:
@@ -176,11 +179,15 @@ class AIRoutingTests(unittest.TestCase):
     def test_model_navigation_intent_does_not_open_a_section(self) -> None:
         async def test() -> None:
             bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
-            message = self._message(bot, "private", "Расскажи шутку про домашнее задание")
+            message = self._message(
+                bot,
+                "private",
+                "Какой самый странный научный факт о космосе?",
+            )
             gateway = AsyncMock(spec=AIGateway)
             gateway.generate.return_value = AIResult(
                 intent="navigation_homework",
-                response="",
+                response="Чтобы открыть раздел, назови его явно. Список разделов — /help",
             )
             with (
                 patch(
@@ -189,15 +196,120 @@ class AIRoutingTests(unittest.TestCase):
                 ) as show_homework,
                 patch.object(Message, "answer", new_callable=AsyncMock) as answer,
             ):
+                with self.assertLogs("bot.handlers.ai", level="INFO") as captured:
+                    await private_text_handler(
+                        message,
+                        RoutingSession(),
+                        _config(),
+                        gateway,
+                    )
+            show_homework.assert_not_awaited()
+            answer.assert_awaited_once_with(
+                "Не до конца понял вопрос. Попробуй сформулировать иначе."
+            )
+            self.assertNotIn("назови его явно", answer.await_args.args[0])
+            self.assertIn("intent=navigation_homework", captured.output[0])
+            self.assertNotIn(message.text, captured.output[0])
+            await bot.session.close()
+
+        asyncio.run(test())
+
+    def test_ordinary_question_reaches_ai_and_returns_one_answer(self) -> None:
+        async def test() -> None:
+            bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+            text = "Какой самый странный научный факт о космосе?"
+            message = self._message(bot, "private", text)
+            gateway = AsyncMock(spec=AIGateway)
+            gateway.generate.return_value = AIResult(
+                intent="ordinary_reply",
+                response="На Венере сутки длиннее года.",
+            )
+            with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
                 await private_text_handler(
                     message,
                     RoutingSession(),
                     _config(),
                     gateway,
                 )
-            show_homework.assert_not_awaited()
-            answer.assert_awaited_once()
-            self.assertIn("назови его явно", answer.await_args.args[0])
+            gateway.generate.assert_awaited_once_with(
+                45,
+                text,
+                allow_humor=False,
+                humor_style="memey",
+            )
+            answer.assert_awaited_once_with("На Венере сутки длиннее года.")
+            await bot.session.close()
+
+        asyncio.run(test())
+
+    def test_explicit_joke_request_reaches_ai_once_with_opted_in_humor(self) -> None:
+        async def test() -> None:
+            bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+            text = "Расскажи короткую шутку"
+            message = self._message(bot, "private", text)
+            gateway = AsyncMock(spec=AIGateway)
+            gateway.generate.return_value = AIResult(
+                intent="joke_or_banter",
+                response="Шутка про кота.",
+            )
+            config = _config()
+            config = replace(
+                config,
+                ai=replace(config.ai, humor_enabled=True),
+            )
+            with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
+                await private_text_handler(
+                    message,
+                    RoutingSession(),
+                    config,
+                    gateway,
+                )
+            gateway.generate.assert_awaited_once_with(
+                45,
+                text,
+                allow_humor=True,
+                humor_style="memey",
+            )
+            answer.assert_awaited_once_with("Шутка про кота.")
+            await bot.session.close()
+
+        asyncio.run(test())
+
+    def test_unavailable_ai_fallback_does_not_claim_a_limit_was_reached(self) -> None:
+        async def test() -> None:
+            bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+            message = self._message(bot, "private", "Поясни этот научный факт")
+            gateway = AsyncMock(spec=AIGateway)
+            gateway.generate.return_value = None
+            with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
+                await private_text_handler(
+                    message,
+                    RoutingSession(),
+                    _config(),
+                    gateway,
+                )
+            gateway.generate.assert_awaited_once()
+            fallback = "Сейчас не удалось получить ответ от AI. Обычные разделы бота работают."
+            answer.assert_awaited_once_with(fallback)
+            self.assertNotIn("лимит", fallback.casefold())
+            await bot.session.close()
+
+        asyncio.run(test())
+
+    def test_user_opt_out_does_not_call_ai_or_send_ai_fallback(self) -> None:
+        async def test() -> None:
+            bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+            message = self._message(bot, "private", "Привет")
+            gateway = AsyncMock(spec=AIGateway)
+            with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
+                await private_text_handler(
+                    message,
+                    RoutingSession(gemini_enabled=False),
+                    _config(),
+                    gateway,
+                )
+            gateway.generate.assert_not_awaited()
+            answer.assert_not_awaited()
             await bot.session.close()
 
         asyncio.run(test())

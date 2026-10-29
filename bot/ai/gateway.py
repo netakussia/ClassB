@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime, time, timedelta, timezone
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select, text
@@ -69,6 +70,7 @@ async def reserve_quota(
     if estimated_tokens <= 0:
         raise ValueError("estimated_tokens must be positive")
     if estimated_tokens > config.global_tokens_per_minute:
+        logger.info("AI quota rejected scope=project window=token_minute")
         return False
     buckets = (
         ("user", str(user_id), "day", user_day, config.user_daily_limit, 1),
@@ -114,6 +116,12 @@ async def reserve_quota(
                             raise _QuotaLimitReached
             return True
         except _QuotaLimitReached:
+            quota_scope = "project" if scope == "global" else scope
+            logger.info(
+                "AI quota rejected scope=%s window=%s",
+                quota_scope,
+                window,
+            )
             return False
         except OperationalError as exc:
             if "locked" not in str(exc.orig).casefold() or attempt + 1 == USER_QUOTA_RETRIES:
@@ -205,7 +213,8 @@ class AIGateway:
             )
         bounded_text = truncate_input(user_text, self._config.max_input_chars)
         async with self._semaphore:
-            for attempt in range(self._config.retries + 1):
+            max_attempts = self._config.retries + 1
+            for attempt in range(max_attempts):
                 try:
                     estimated_tokens = (
                         len(bounded_text.encode("utf-8"))
@@ -223,6 +232,7 @@ class AIGateway:
                     return None
                 if not reserved:
                     return None
+                request_started = monotonic()
                 try:
                     async with asyncio.timeout(self._config.timeout_seconds):
                         raw = await self._client.generate(
@@ -231,17 +241,39 @@ class AIGateway:
                             humor_style=humor_style if humor_style in {"memey", "gentle"} else "memey",
                         )
                 except (GeminiTemporaryError, asyncio.TimeoutError) as exc:
-                    logger.warning("Gemini temporary failure (%s)", type(exc).__name__)
+                    logger.warning(
+                        "Gemini temporary failure attempt=%d/%d retrying=%s "
+                        "exception_type=%s elapsed_ms=%d",
+                        attempt + 1,
+                        max_attempts,
+                        attempt + 1 < max_attempts,
+                        type(exc).__name__,
+                        int((monotonic() - request_started) * 1000),
+                    )
                     if attempt < self._config.retries:
                         continue
                     return None
                 except Exception as exc:
-                    logger.warning("Gemini request unavailable (%s)", type(exc).__name__)
+                    logger.warning(
+                        "Gemini request unavailable exception_type=%s elapsed_ms=%d",
+                        type(exc).__name__,
+                        int((monotonic() - request_started) * 1000),
+                    )
                     return None
 
+                elapsed_ms = int((monotonic() - request_started) * 1000)
+                logger.info(
+                    "Gemini request completed attempt=%d/%d elapsed_ms=%d",
+                    attempt + 1,
+                    max_attempts,
+                    elapsed_ms,
+                )
                 result = parse_model_result(raw)
                 if result is None:
-                    logger.warning("Gemini response failed local validation")
+                    logger.warning(
+                        "Gemini response failed local validation elapsed_ms=%d",
+                        elapsed_ms,
+                    )
                     return None
                 if result.intent == "joke_or_banter" and (
                     not allow_humor or not is_explicit_banter_request(user_text)

@@ -5,6 +5,8 @@ import logging
 import re
 from typing import Protocol
 
+import httpx
+
 logger = logging.getLogger(__name__)
 _GEMINI_API_VERSION = "v1beta"
 _GEMINI_METHOD = "models.generate_content"
@@ -124,8 +126,20 @@ class GeminiClient:
                 ),
                 timeout=self._timeout_seconds,
             )
-        except asyncio.TimeoutError:
-            raise GeminiTemporaryError("Gemini request timed out") from None
+        except (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError) as exc:
+            is_timeout = isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException))
+            logger.warning(
+                "Gemini transport failure method=%s api_version=%s model=%s "
+                "category=%s exception_type=%s",
+                _GEMINI_METHOD,
+                _GEMINI_API_VERSION,
+                self._model,
+                "timeout" if is_timeout else "connect",
+                type(exc).__name__,
+            )
+            if is_timeout:
+                raise GeminiTemporaryError("Gemini request timed out") from None
+            raise GeminiTemporaryError("Gemini connection failed") from None
         except Exception as exc:
             status_code = getattr(exc, "code", getattr(exc, "status_code", None))
             api_status = getattr(exc, "status", None)

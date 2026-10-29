@@ -29,6 +29,16 @@ if [[ ! "$REMOTE_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] \
     exit 2
 fi
 
+COMPOSE_OVERRIDE="${DEPLOY_COMPOSE_OVERRIDE:-}"
+if [[ -n "$COMPOSE_OVERRIDE" ]] \
+    && { [[ ! "$COMPOSE_OVERRIDE" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+        || [[ "$COMPOSE_OVERRIDE" == *"//"* || "$COMPOSE_OVERRIDE" == */ \
+            || "$COMPOSE_OVERRIDE" == *"/../"* || "$COMPOSE_OVERRIDE" == */.. \
+            || "$COMPOSE_OVERRIDE" == *"/./"* || "$COMPOSE_OVERRIDE" == */. ]]; }; then
+    printf 'DEPLOY_COMPOSE_OVERRIDE must be a normalized absolute path.\n' >&2
+    exit 2
+fi
+
 TIMESTAMP="$(date +%Y%m%d_%H%M%S_%N)"
 REMOTE_ARCHIVE="${REMOTE_DIR}/.rc-215-deploy-${TIMESTAMP}.tar.gz"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rc-215-deploy.XXXXXX")"
@@ -54,13 +64,14 @@ if tar -tzf "$ARCHIVE" | grep -Eq '(^|/)(data|logs|__pycache__)(/|$)|(^|/)\.env(
 fi
 
 printf 'Creating server-side backups before upload or overlay...\n'
-ssh "$REMOTE" bash -s -- "$REMOTE_DIR" "$TIMESTAMP" "$REMOTE_ARCHIVE" <<'REMOTE_BACKUP'
+ssh "$REMOTE" bash -s -- "$REMOTE_DIR" "$TIMESTAMP" "$REMOTE_ARCHIVE" "$COMPOSE_OVERRIDE" <<'REMOTE_BACKUP'
 set -Eeuo pipefail
 umask 077
 
 app_dir="$1"
 timestamp="$2"
 remote_archive="$3"
+compose_override="${4:-}"
 database_path="${app_dir}/data/bot.db"
 backup_root="${HOME}/backups/rc-215"
 backup_dir="${backup_root}/${timestamp}"
@@ -82,39 +93,75 @@ test ! -L "${app_dir}/.env" || { printf 'Server environment file must not be a s
 test -r "$database_path" || { printf 'Application database is not readable.\n' >&2; exit 1; }
 test -r "${app_dir}/config" || { printf 'Application config is not readable.\n' >&2; exit 1; }
 test -r "${app_dir}/.env" || { printf 'Server environment file is not readable.\n' >&2; exit 1; }
-if grep -Eq '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL[[:space:]]*=' "${app_dir}/.env" \
-    || grep -q 'DATABASE_URL' "${app_dir}/docker-compose.yml"; then
+compose_files=("${app_dir}/docker-compose.yml")
+if [[ -n "$compose_override" ]]; then
+    test -f "$compose_override" || { printf 'Active Compose override not found.\n' >&2; exit 1; }
+    test ! -L "$compose_override" || { printf 'Active Compose override must not be a symlink.\n' >&2; exit 1; }
+    compose_files+=("$compose_override")
+fi
+for compose_file in "${compose_files[@]}"; do
+    [[ "$compose_file" != *:* ]] || {
+        printf 'Compose file paths containing colons are unsupported.\n' >&2
+        exit 1
+    }
+done
+export COMPOSE_FILE="$(IFS=:; printf '%s' "${compose_files[*]}")"
+
+container_status="$(docker inspect --format '{{.State.Status}}' rc-215-bot-1)"
+test "$container_status" = "running" || {
+    printf 'Expected running container rc-215-bot-1; refusing deployment.\n' >&2
+    exit 1
+}
+active_compose_files="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' rc-215-bot-1)"
+expected_compose_files="${app_dir}/docker-compose.yml"
+if [[ -n "$compose_override" ]]; then
+    test -f "$compose_override" || { printf 'Active Compose override not found.\n' >&2; exit 1; }
+    test ! -L "$compose_override" || { printf 'Active Compose override must not be a symlink.\n' >&2; exit 1; }
+    expected_compose_files+=",${compose_override}"
+fi
+test "$active_compose_files" = "$expected_compose_files" || {
+    printf 'Active Compose files differ from the requested deployment configuration.\n' >&2
+    exit 1
+}
+for compose_file in "${compose_files[@]}"; do
+    if grep -q 'DATABASE_URL' "$compose_file"; then
+        printf 'A DATABASE_URL override is present; automatic backup only supports data/bot.db. Aborting.\n' >&2
+        exit 1
+    fi
+done
+if grep -Eq '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL[[:space:]]*=' "${app_dir}/.env"; then
     printf 'A DATABASE_URL override is present; automatic backup only supports data/bot.db. Aborting.\n' >&2
     exit 1
 fi
-python3 - "${app_dir}/docker-compose.yml" <<'PYTHON_ENV_FILE_CHECK'
+python3 - "${compose_files[@]}" <<'PYTHON_ENV_FILE_CHECK'
 import re
 import sys
 
-lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 env_files = []
-for index, line in enumerate(lines):
-    match = re.match(r"^(\s*)env_file\s*:\s*(.*?)\s*(?:#.*)?$", line)
-    if match is None:
-        continue
-    indentation = len(match.group(1))
-    inline_value = match.group(2).strip().strip("\"'")
-    if inline_value:
-        env_files.append(inline_value)
-        continue
-    for candidate in lines[index + 1:]:
-        stripped = candidate.strip()
-        if not stripped or stripped.startswith("#"):
+for compose_path in sys.argv[1:]:
+    lines = open(compose_path, encoding="utf-8").read().splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^(\s*)env_file\s*:\s*(.*?)\s*(?:#.*)?$", line)
+        if match is None:
             continue
-        candidate_indent = len(candidate) - len(candidate.lstrip())
-        if candidate_indent <= indentation:
-            break
-        entry = re.match(r"^\s*-\s*(.*?)\s*(?:#.*)?$", candidate)
-        if entry is None:
-            raise SystemExit(
-                "Compose environment-file format cannot be verified; refusing deployment."
-            )
-        env_files.append(entry.group(1).strip().strip("\"'"))
+        indentation = len(match.group(1))
+        inline_value = match.group(2).strip().strip("\"'")
+        if inline_value:
+            env_files.append(inline_value)
+            continue
+        for candidate in lines[index + 1:]:
+            stripped = candidate.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            candidate_indent = len(candidate) - len(candidate.lstrip())
+            if candidate_indent <= indentation:
+                break
+            entry = re.match(r"^\s*-\s*(.*?)\s*(?:#.*)?$", candidate)
+            if entry is None:
+                raise SystemExit(
+                    "Compose environment-file format cannot be verified; refusing deployment."
+                )
+            env_files.append(entry.group(1).strip().strip("\"'"))
 if env_files != [".env"]:
     raise SystemExit(
         "Compose must use only the backed-up .env file; refusing deployment."
@@ -158,7 +205,7 @@ for entry in env_files:
     if not isinstance(path, str):
         raise SystemExit("Compose environment-file format is unsupported; refusing deployment.")
     normalized_env_files.append(resolve_path(path))
-if normalized_env_files != [(app_dir / ".env").resolve()]:
+if normalized_env_files not in ([], [(app_dir / ".env").resolve()]):
     raise SystemExit("Compose must use only the backed-up .env file; refusing deployment.")
 
 environment = service.get("environment", {})
@@ -233,19 +280,79 @@ done
 
 tar -czf "${backup_dir}/predeploy-files.tar.gz" -C "$app_dir" -- "${present_paths[@]}"
 tar -tzf "${backup_dir}/predeploy-files.tar.gz" >/dev/null
-tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fxq 'config/'
-tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fxq 'config/students.yaml'
-tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fxq 'data/bot.db'
-tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fxq '.env'
-tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fxq 'docker-compose.yml'
+tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fx 'config/' >/dev/null
+tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fx 'config/students.yaml' >/dev/null
+tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fx 'data/bot.db' >/dev/null
+tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fx '.env' >/dev/null
+tar -tzf "${backup_dir}/predeploy-files.tar.gz" | grep -Fx 'docker-compose.yml' >/dev/null
 chmod 600 "${backup_dir}/predeploy-files.tar.gz"
 
+source_paths=(bot database main.py config_loader.py requirements.txt)
+for relative_path in "${source_paths[@]}"; do
+    test -e "${app_dir}/${relative_path}" || {
+        printf 'Source rollback path is missing: %s\n' "$relative_path" >&2
+        exit 1
+    }
+done
+tar -czf "${backup_dir}/predeploy-source.tar.gz" -C "$app_dir" -- "${source_paths[@]}"
+tar -tzf "${backup_dir}/predeploy-source.tar.gz" >/dev/null
+chmod 600 "${backup_dir}/predeploy-source.tar.gz"
+source_restore_dir="$(mktemp -d "${backup_dir}/.source-restore-check.XXXXXX")"
+tar -xzf "${backup_dir}/predeploy-source.tar.gz" -C "$source_restore_dir"
+for required_path in main.py config_loader.py requirements.txt bot database; do
+    test -e "${source_restore_dir}/${required_path}" || {
+        printf 'Source rollback restore check failed for %s.\n' "$required_path" >&2
+        exit 1
+    }
+done
+rm -rf -- "$source_restore_dir"
+
+restore_check_dir="$(mktemp -d "${backup_dir}/.restore-check.XXXXXX")"
+tar -xzf "${backup_dir}/predeploy-files.tar.gz" -C "$restore_check_dir"
+for required_path in config/students.yaml data/bot.db .env docker-compose.yml; do
+    test -f "${restore_check_dir}/${required_path}" || {
+        printf 'Backup restore check failed for %s.\n' "$required_path" >&2
+        exit 1
+    }
+done
+rm -rf -- "$restore_check_dir"
+
+if [[ -n "$compose_override" ]]; then
+    case "$compose_override" in
+        "${HOME}/"*) ;;
+        *)
+            printf 'Active Compose override must be under the server home directory.\n' >&2
+            exit 1
+            ;;
+    esac
+    override_relative="${compose_override#${HOME}/}"
+    test -n "$override_relative" || {
+        printf 'Active Compose override path is invalid.\n' >&2
+        exit 1
+    }
+    tar -czf "${backup_dir}/predeploy-compose-override.tar.gz" \
+        -C "$HOME" -- "$override_relative"
+    tar -tzf "${backup_dir}/predeploy-compose-override.tar.gz" \
+        | grep -Fx "$override_relative" >/dev/null
+    override_restore_dir="$(mktemp -d "${backup_dir}/.compose-restore-check.XXXXXX")"
+    tar -xzf "${backup_dir}/predeploy-compose-override.tar.gz" -C "$override_restore_dir"
+    test -f "${override_restore_dir}/${override_relative}" || {
+        printf 'Compose override backup restore check failed.\n' >&2
+        exit 1
+    }
+    rm -rf -- "$override_restore_dir"
+    chmod 600 "${backup_dir}/predeploy-compose-override.tar.gz"
+fi
+
 python3 - "$database_path" "${backup_dir}/sqlite-bot.db" <<'PYTHON_BACKUP'
+import os
 import sqlite3
 import sys
 
 source = sqlite3.connect(sys.argv[1], timeout=30)
 destination = sqlite3.connect(sys.argv[2])
+restore_path = f"{sys.argv[2]}.restore-check"
+restore = sqlite3.connect(restore_path)
 try:
     source_check = source.execute("PRAGMA integrity_check").fetchone()[0]
     if source_check != "ok":
@@ -254,13 +361,20 @@ try:
     backup_check = destination.execute("PRAGMA integrity_check").fetchone()[0]
     if backup_check != "ok":
         raise SystemExit("SQLite backup integrity check failed")
+    destination.backup(restore)
+    restore_check = restore.execute("PRAGMA integrity_check").fetchone()[0]
+    if restore_check != "ok":
+        raise SystemExit("SQLite backup restore check failed")
 finally:
+    restore.close()
     destination.close()
     source.close()
+if os.path.exists(restore_path):
+    os.remove(restore_path)
 PYTHON_BACKUP
 chmod 600 "${backup_dir}/sqlite-bot.db"
 
-printf 'Backup created and verified: %s\n' "$backup_dir"
+printf 'Backup created and restore-verified: %s\n' "$backup_dir"
 REMOTE_BACKUP
 
 printf 'Uploading the validated source archive to the allowlisted destination...\n'
@@ -316,11 +430,25 @@ printf 'Source overlay installed. The uploaded archive is retained for inspectio
 REMOTE_INSTALL
 
 printf 'Rebuilding and restarting the bot without removing volumes...\n'
-ssh "$REMOTE" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART'
+ssh "$REMOTE" bash -s -- "$REMOTE_DIR" "$COMPOSE_OVERRIDE" <<'REMOTE_RESTART'
 set -Eeuo pipefail
 
 app_dir="$1"
+compose_override="${2:-}"
 cd "$app_dir"
+compose_files=("${app_dir}/docker-compose.yml")
+if [[ -n "$compose_override" ]]; then
+    test -f "$compose_override" || { printf 'Active Compose override not found.\n' >&2; exit 1; }
+    test ! -L "$compose_override" || { printf 'Active Compose override must not be a symlink.\n' >&2; exit 1; }
+    compose_files+=("$compose_override")
+fi
+for compose_file in "${compose_files[@]}"; do
+    [[ "$compose_file" != *:* ]] || {
+        printf 'Compose file paths containing colons are unsupported.\n' >&2
+        exit 1
+    }
+done
+export COMPOSE_FILE="$(IFS=:; printf '%s' "${compose_files[*]}")"
 docker compose up -d --build bot
 docker compose ps --status running --services | grep -Fxq bot || {
     printf 'Bot container did not reach the running state.\n' >&2

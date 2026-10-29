@@ -27,8 +27,9 @@ def calculate_lesson_times(
     overrides: Iterable[ScheduleTimeOverride] = (),
     *,
     lesson_numbers: Iterable[int] | None = None,
+    configured_start_times: Iterable[str] | None = None,
 ) -> list[LessonClock]:
-    """Calculate lesson start/end times while preserving the configured breaks."""
+    """Calculate lesson clocks, rebuilding shortened days from timetable slot one."""
     if default_duration_minutes <= 0:
         raise ValueError("default_duration_minutes must be positive")
 
@@ -93,19 +94,83 @@ def calculate_lesson_times(
         ),
         None,
     )
-    gaps = [
+    if override_rows:
+        configured_starts: list[datetime] = []
+        for value in configured_start_times or ():
+            start_text = value.strip().split("–", maxsplit=1)[0].split("-", maxsplit=1)[0].strip()
+            try:
+                configured_starts.append(
+                    datetime.combine(date.min, time.fromisoformat(start_text))
+                )
+            except ValueError as exc:
+                raise ValueError(f"Invalid configured lesson start time: {value}") from exc
+
+        anchors = {
+            slot: start
+            for slot, start in zip(range(1, len(configured_starts) + 1), configured_starts)
+        }
+        anchors.update(start_by_slot)
+        day_start = anchors.get(1, datetime.combine(date.min, time(8, 0)))
+
+        virtual_slots = range(1, max(unique_slots, default=0) + 1)
+        durations_by_slot: dict[int, timedelta] = {}
+        shortened_by_slot: dict[int, bool] = {}
+        for slot in virtual_slots:
+            specific_override = specific_overrides.get(slot)
+            duration_minutes = (
+                specific_override.duration_minutes
+                if specific_override is not None
+                else global_override.duration_minutes
+                if global_override is not None
+                else default_duration_minutes
+            )
+            if duration_minutes <= 0:
+                raise ValueError("Lesson duration overrides must be positive")
+            durations_by_slot[slot] = timedelta(minutes=duration_minutes)
+            shortened_by_slot[slot] = duration_minutes < default_duration_minutes
+
+        configured_big_break = timedelta(minutes=10)
+        if 2 in anchors and 3 in anchors:
+            configured_big_break = max(
+                timedelta(0),
+                anchors[3] - anchors[2] - default_duration,
+            )
+        if big_break_minutes is not None:
+            if big_break_minutes < 0:
+                raise ValueError("Big break duration cannot be negative")
+            configured_big_break = timedelta(minutes=big_break_minutes)
+
+        clocks_by_slot: dict[int, LessonClock] = {}
+        current_start = day_start
+        for slot in virtual_slots:
+            current_end = current_start + durations_by_slot[slot]
+            if slot in start_by_slot:
+                clocks_by_slot[slot] = LessonClock(
+                    current_start.strftime("%H:%M"),
+                    current_end.strftime("%H:%M"),
+                    shortened_by_slot[slot],
+                )
+            if slot < max(unique_slots, default=0):
+                gap = configured_big_break if slot == 2 else timedelta(minutes=10)
+                current_start = current_end + gap
+        return [clocks_by_slot[slot] for slot in slot_numbers]
+
+    configured_gaps = [
         max(
             timedelta(0),
             unique_starts[index + 1] - unique_starts[index] - default_duration,
         )
         for index in range(max(0, len(unique_starts) - 1))
     ]
-    if big_break_minutes is not None:
-        if big_break_minutes < 0:
-            raise ValueError("Big break duration cannot be negative")
-        if len(gaps) >= 2:
-            gaps[1] = timedelta(minutes=big_break_minutes)
-
+    gaps = (
+        [timedelta(minutes=10) for _ in configured_gaps]
+        if override_rows
+        else configured_gaps
+    )
+    if override_rows and big_break_minutes is None and 2 in unique_slots:
+        big_break_index = unique_slots.index(2)
+        if big_break_index < len(gaps):
+            gaps[big_break_index] = configured_gaps[big_break_index]
     result: list[LessonClock] = []
     current_start = unique_starts[0] if unique_starts else None
     for index, duration in enumerate(durations):

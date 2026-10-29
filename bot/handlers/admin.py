@@ -29,6 +29,7 @@ from bot.ui import MenuCallback, add_cancel_button, menu_back_keyboard
 from bot.utils.homework_dates import local_today, next_lesson_date, subjects_for_date
 from bot.utils.schedule_parser import (
     WEEKDAYS,
+    configured_lesson_start_times,
     lesson_numbers_for_day,
     parse_schedule,
 )
@@ -2225,6 +2226,7 @@ async def _prepare_schedule_time_preview(
         config.schedule.lesson_duration_minutes,
         effective,
         lesson_numbers=lesson_numbers,
+        configured_start_times=configured_lesson_start_times(config.schedule),
     )
     lines = [
         f"{get_emoji('shortened')} Предпросмотр звонков на {target_date:%d.%m.%Y}:",
@@ -2394,6 +2396,7 @@ async def _send_schedule_time_broadcast(
         config.schedule.lesson_duration_minutes,
         overrides,
         lesson_numbers=lesson_numbers,
+        configured_start_times=configured_lesson_start_times(config.schedule),
     )
     text = (
         f"{get_emoji('notice')} Изменение расписания звонков "

@@ -87,6 +87,42 @@ class ScheduleTimeOverrideTests(unittest.TestCase):
             ],
         )
 
+    def test_sixty_minute_lessons_place_big_break_after_second(self) -> None:
+        clocks = calculate_lesson_times(
+            ["08:00", "09:40", "11:40", "13:20", "15:00"],
+            60,
+            [_override(None, 60, 20)],
+        )
+
+        self.assertEqual(
+            clocks,
+            [
+                ("08:00", "09:00", False),
+                ("09:10", "10:10", False),
+                ("10:30", "11:30", False),
+                ("11:40", "12:40", False),
+                ("12:50", "13:50", False),
+            ],
+        )
+
+    def test_shortened_schedule_calculation(self) -> None:
+        clocks = calculate_lesson_times(
+            ["11:40", "13:20", "15:00"],
+            60,
+            [_override(None, 60, 20)],
+            lesson_numbers=[3, 4, 5],
+            configured_start_times=["08:00", "09:40", "11:40", "13:20", "15:00"],
+        )
+
+        self.assertEqual(
+            clocks,
+            [
+                ("10:30", "11:30", False),
+                ("11:40", "12:40", False),
+                ("12:50", "13:50", False),
+            ],
+        )
+
     def test_specific_lesson_override_keeps_other_lesson_durations(self) -> None:
         clocks = calculate_lesson_times(
             ["08:00", "09:40", "11:40", "13:20"],

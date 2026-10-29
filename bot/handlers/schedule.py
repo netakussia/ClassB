@@ -18,6 +18,7 @@ from bot.utils.emojis import get_btn_emoji, get_button_label, get_emoji
 from bot.utils.schedule_parser import (
     WEEKDAYS,
     Lesson,
+    configured_lesson_start_times,
     lesson_numbers_for_day,
     parse_schedule,
 )
@@ -291,6 +292,7 @@ async def show_next_schedule(
             config.schedule.lesson_duration_minutes,
             time_overrides,
             lesson_numbers=lesson_numbers,
+            configured_start_times=configured_lesson_start_times(config.schedule),
         )
         if time_overrides
         else []

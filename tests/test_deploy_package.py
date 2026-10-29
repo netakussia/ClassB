@@ -172,6 +172,8 @@ class DeployPackageTests(unittest.TestCase):
         home = root / "server-home"
         for relative_path in ("config", "data", "logs", "bot", "database", "tests"):
             (app_dir / relative_path).mkdir(parents=True, exist_ok=True)
+        for relative_path in ("main.py", "config_loader.py", "requirements.txt"):
+            (app_dir / relative_path).write_text("fixture source\n", encoding="utf-8")
         (app_dir / "config/students.yaml").write_text("fixture roster\n", encoding="utf-8")
         (app_dir / "config/active.yaml").write_text("fixture config\n", encoding="utf-8")
         (app_dir / ".env").write_text("fixture environment\n", encoding="utf-8")
@@ -254,6 +256,8 @@ class DeployPackageTests(unittest.TestCase):
         )
         (fake_bin / "docker").write_text(
             "#!/usr/bin/env bash\n"
+            "if [[ \"$*\" == 'inspect --format {{.State.Status}} rc-215-bot-1' ]]; then printf 'running\\n'; exit 0; fi\n"
+            "if [[ \"$*\" == 'inspect --format {{index .Config.Labels \"com.docker.compose.project.config_files\"}} rc-215-bot-1' ]]; then printf '%s\\n' \"${COMPOSE_FILE//:/,}\"; exit 0; fi\n"
             f'if [[ "$*" == "compose config --format json" ]]; then cat {str(compose_config_path)!r}; exit 0; fi\n'
             f"printf '%s\\n' \"$*\" >> {str(docker_marker)!r}\n"
             'if [[ "$*" == "compose up -d --build bot" ]]; then exit 0; fi\n'
@@ -403,6 +407,54 @@ class DeployPackageTests(unittest.TestCase):
                     restored.execute("SELECT value FROM fixture").fetchone()[0],
                     "preserve me",
                 )
+
+    def test_fake_deployment_preserves_and_backs_up_active_compose_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            script, app_dir, home, _database_path, _scp_marker, _docker_marker = (
+                self._prepare_fake_remote(directory)
+            )
+            override = home / "candidate" / "compose-candidate.yml"
+            override.parent.mkdir(parents=True)
+            override.write_text(
+                "services:\n  bot:\n    image: rc-215-bot:candidate\n",
+                encoding="utf-8",
+            )
+            environment = {
+                "DEPLOY_REMOTE_DIR": str(app_dir),
+                "DEPLOY_COMPOSE_OVERRIDE": str(override),
+                "HOME": str(home),
+                "PATH": f"{script.parent.parent / 'bin'}:{os.environ['PATH']}",
+            }
+
+            result = self._run_deploy(script, "approved@staging.example", environment)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            backup_dirs = list((home / "backups/rc-215").iterdir())
+            self.assertEqual(len(backup_dirs), 1)
+            override_backup = backup_dirs[0] / "predeploy-compose-override.tar.gz"
+            with tarfile.open(override_backup, "r:gz") as archive:
+                self.assertIn("candidate/compose-candidate.yml", archive.getnames())
+                extracted = archive.extractfile("candidate/compose-candidate.yml")
+                self.assertIsNotNone(extracted)
+                self.assertEqual(extracted.read(), override.read_bytes())
+
+    def test_empty_effective_env_file_list_uses_source_validated_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            script, app_dir, _home, _database_path, _scp_marker, _docker_marker = (
+                self._prepare_fake_remote(directory)
+            )
+            config_path = Path(directory) / "compose-config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["services"]["bot"].pop("env_file")
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            environment = {
+                "DEPLOY_REMOTE_DIR": str(app_dir),
+                "PATH": f"{script.parent.parent / 'bin'}:{os.environ['PATH']}",
+            }
+
+            result = self._run_deploy(script, "approved@staging.example", environment)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_corrupt_database_aborts_before_upload_overlay_or_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

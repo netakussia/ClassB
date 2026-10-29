@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
+import httpx
 from google.genai.errors import ClientError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -180,19 +181,61 @@ class AIGatewayTests(unittest.TestCase):
                 factory = async_sessionmaker(engine, expire_on_commit=False)
                 async with engine.begin() as connection:
                     await connection.run_sync(Base.metadata.create_all)
-                accepted = await reserve_quota(
-                    factory,
-                    92,
-                    AIConfig(global_tokens_per_minute=100),
-                    "Europe/Chisinau",
-                    estimated_tokens=101,
-                )
+                with self.assertLogs("bot.ai.gateway", level="INFO") as captured:
+                    accepted = await reserve_quota(
+                        factory,
+                        92,
+                        AIConfig(global_tokens_per_minute=100),
+                        "Europe/Chisinau",
+                        estimated_tokens=101,
+                    )
                 self.assertFalse(accepted)
+                self.assertIn(
+                    "AI quota rejected scope=project window=token_minute",
+                    captured.output[0],
+                )
                 async with factory() as session:
                     count = await session.scalar(
                         select(func.count()).select_from(AIQuotaCounter)
                     )
                     self.assertEqual(count, 0)
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_consecutive_requests_send_only_current_message_to_generator(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'consecutive.db'}"
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+                generator = FakeGenerator()
+                gateway = AIGateway(
+                    generator,
+                    factory,
+                    AIConfig(enabled=True, project_limits_verified=True),
+                    "Europe/Chisinau",
+                )
+                messages = (
+                    "Первое сообщение",
+                    "Второе сообщение",
+                    "Третье сообщение",
+                )
+                results = [
+                    await gateway.generate(45, message, allow_humor=False)
+                    for message in messages
+                ]
+                self.assertEqual(
+                    [
+                        result.response if result is not None else None
+                        for result in results
+                    ],
+                    ["Понял."] * len(messages),
+                )
+                self.assertEqual(generator.calls, list(messages))
                 await engine.dispose()
 
         self._run(test)
@@ -282,9 +325,11 @@ class AIGatewayTests(unittest.TestCase):
                     ),
                     "Europe/Chisinau",
                 )
-                result = await gateway.generate(99, "hello", allow_humor=False)
+                with self.assertLogs("bot.ai.gateway", level="WARNING") as captured:
+                    result = await gateway.generate(99, "hello", allow_humor=False)
                 self.assertEqual(result.response, "Понял.")
                 self.assertEqual(generator.calls, ["hello", "hello"])
+                self.assertIn("attempt=1/2 retrying=True", captured.output[0])
                 async with factory() as session:
                     count = await session.scalar(
                         select(func.sum(AIQuotaCounter.count)).where(
@@ -294,6 +339,301 @@ class AIGatewayTests(unittest.TestCase):
                         )
                     )
                     self.assertEqual(count, 2)
+                    user_daily_count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "user",
+                            AIQuotaCounter.scope_id == "99",
+                            AIQuotaCounter.window == "day",
+                        )
+                    )
+                    project_daily_count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "global",
+                            AIQuotaCounter.window == "day",
+                        )
+                    )
+                    self.assertEqual(user_daily_count, 2)
+                    self.assertEqual(project_daily_count, 2)
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_timeout_retry_is_counted_per_api_attempt_and_reports_duration(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'timeout-retry.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+                client = GeminiClient("test-key", "gemini-test-model", 5)
+                endpoint = client._client.aio.models
+                endpoint.generate_content = AsyncMock(
+                    side_effect=[
+                        asyncio.TimeoutError(),
+                        SimpleNamespace(
+                            text='{"intent":"ordinary_reply","response":"Понял."}',
+                            candidates=[object()],
+                        ),
+                    ]
+                )
+                gateway = AIGateway(
+                    client,
+                    factory,
+                    AIConfig(
+                        enabled=True,
+                        project_limits_verified=True,
+                        prompt_token_reserve=1,
+                        joke_max_output_tokens=16,
+                        retries=1,
+                    ),
+                    "Europe/Chisinau",
+                )
+
+                with (
+                    self.assertLogs("bot.ai.gemini_client", level="WARNING") as client_logs,
+                    self.assertLogs("bot.ai.gateway", level="WARNING") as gateway_logs,
+                ):
+                    result = await gateway.generate(
+                        204,
+                        "timeout test",
+                        allow_humor=False,
+                    )
+
+                self.assertEqual(result.response, "Понял.")
+                self.assertEqual(endpoint.generate_content.await_count, 2)
+                client_diagnostics = "\n".join(client_logs.output)
+                gateway_diagnostics = "\n".join(gateway_logs.output)
+                self.assertIn("category=timeout", client_diagnostics)
+                self.assertIn("attempt=1/2 retrying=True", gateway_diagnostics)
+                self.assertIn("elapsed_ms=", gateway_diagnostics)
+                self.assertNotIn("timeout test", client_diagnostics + gateway_diagnostics)
+
+                async with factory() as session:
+                    counters = {
+                        (row.scope, row.window): row.count
+                        for row in (await session.scalars(select(AIQuotaCounter))).all()
+                    }
+                self.assertEqual(counters[("user", "day")], 2)
+                self.assertEqual(counters[("global", "day")], 2)
+                await client.close()
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_connect_error_uses_configured_retry_without_logging_input(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'connect-retry.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+                client = GeminiClient("test-key", "gemini-test-model", 5)
+                endpoint = client._client.aio.models
+                endpoint.generate_content = AsyncMock(
+                    side_effect=[
+                        httpx.ConnectError(
+                            "connection refused: private phrase",
+                            request=httpx.Request(
+                                "POST",
+                                "https://example.test/generate",
+                            ),
+                        ),
+                        SimpleNamespace(
+                            text='{"intent":"ordinary_reply","response":"Понял."}',
+                            candidates=[object()],
+                        ),
+                    ]
+                )
+                gateway = AIGateway(
+                    client,
+                    factory,
+                    AIConfig(
+                        enabled=True,
+                        project_limits_verified=True,
+                        retries=1,
+                    ),
+                    "Europe/Chisinau",
+                )
+                with (
+                    self.assertLogs("bot.ai.gemini_client", level="WARNING") as client_logs,
+                    self.assertLogs("bot.ai.gateway", level="WARNING") as gateway_logs,
+                ):
+                    result = await gateway.generate(
+                        205,
+                        "private phrase",
+                        allow_humor=False,
+                    )
+
+                self.assertEqual(result.response, "Понял.")
+                self.assertEqual(endpoint.generate_content.await_count, 2)
+                diagnostics = "\n".join(client_logs.output + gateway_logs.output)
+                self.assertIn("category=connect", diagnostics)
+                self.assertIn("attempt=1/2 retrying=True", diagnostics)
+                self.assertNotIn("private phrase", diagnostics)
+                self.assertNotIn("connection refused", diagnostics)
+                await client.close()
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_authorization_error_does_not_retry_or_hide_http_status(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'authorization-error.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+                client = GeminiClient("test-key", "gemini-test-model", 5)
+                endpoint = client._client.aio.models
+                endpoint.generate_content = AsyncMock(
+                    side_effect=ClientError(
+                        403,
+                        {
+                            "error": {
+                                "code": 403,
+                                "status": "PERMISSION_DENIED",
+                                "message": "Permission denied",
+                            }
+                        },
+                    )
+                )
+                gateway = AIGateway(
+                    client,
+                    factory,
+                    AIConfig(
+                        enabled=True,
+                        project_limits_verified=True,
+                        retries=1,
+                    ),
+                    "Europe/Chisinau",
+                )
+                with (
+                    self.assertLogs("bot.ai.gemini_client", level="WARNING") as client_logs,
+                    self.assertLogs("bot.ai.gateway", level="WARNING") as gateway_logs,
+                ):
+                    result = await gateway.generate(
+                        206,
+                        "hello",
+                        allow_humor=False,
+                    )
+
+                self.assertIsNone(result)
+                self.assertEqual(endpoint.generate_content.await_count, 1)
+                self.assertIn("http_status=403", "\n".join(client_logs.output))
+                self.assertIn("elapsed_ms=", "\n".join(gateway_logs.output))
+                async with factory() as session:
+                    user_daily_count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "user",
+                            AIQuotaCounter.scope_id == "206",
+                            AIQuotaCounter.window == "day",
+                        )
+                    )
+                self.assertEqual(user_daily_count, 1)
+                await client.close()
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_invalid_model_payload_is_not_retried(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'invalid-payload.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+                client = GeminiClient("test-key", "gemini-test-model", 5)
+                endpoint = client._client.aio.models
+                endpoint.generate_content = AsyncMock(
+                    return_value=SimpleNamespace(
+                        text="not-json",
+                        candidates=[object()],
+                    )
+                )
+                gateway = AIGateway(
+                    client,
+                    factory,
+                    AIConfig(
+                        enabled=True,
+                        project_limits_verified=True,
+                        retries=1,
+                    ),
+                    "Europe/Chisinau",
+                )
+                with self.assertLogs("bot.ai.gateway", level="WARNING") as captured:
+                    result = await gateway.generate(
+                        207,
+                        "hello",
+                        allow_humor=False,
+                    )
+
+                self.assertIsNone(result)
+                self.assertEqual(endpoint.generate_content.await_count, 1)
+                self.assertIn("failed local validation", captured.output[0])
+                self.assertIn("elapsed_ms=", captured.output[0])
+                await client.close()
+                await engine.dispose()
+
+        self._run(test)
+
+    def test_user_minute_limit_logs_rejection_without_a_second_api_attempt(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'user-minute-limit.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+                generator = FakeGenerator()
+                gateway = AIGateway(
+                    generator,
+                    factory,
+                    AIConfig(
+                        enabled=True,
+                        project_limits_verified=True,
+                        user_per_minute_limit=1,
+                    ),
+                    "Europe/Chisinau",
+                )
+                with self.assertLogs("bot.ai.gateway", level="INFO") as captured:
+                    first = await gateway.generate(45, "first", allow_humor=False)
+                    second = await gateway.generate(45, "second", allow_humor=False)
+                self.assertIsNotNone(first)
+                self.assertIsNone(second)
+                self.assertEqual(generator.calls, ["first"])
+                self.assertTrue(
+                    any(
+                        "AI quota rejected scope=user window=minute" in entry
+                        for entry in captured.output
+                    )
+                )
+                async with factory() as session:
+                    count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "user",
+                            AIQuotaCounter.scope_id == "45",
+                            AIQuotaCounter.window == "minute",
+                        )
+                    )
+                    self.assertEqual(count, 1)
                 await engine.dispose()
 
         self._run(test)

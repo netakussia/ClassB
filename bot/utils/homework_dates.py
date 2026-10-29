@@ -6,7 +6,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.utils.schedule_parser import WEEKDAYS, lesson_numbers_for_day, parse_schedule
+from bot.utils.schedule_parser import (
+    WEEKDAYS,
+    configured_lesson_start_times,
+    lesson_numbers_for_day,
+    parse_schedule,
+)
 from bot.utils.time_utils import calculate_lesson_times, get_configured_week_parity
 from config_loader import AppConfig
 from database.models import ScheduleOverride, ScheduleTimeOverride
@@ -126,6 +131,7 @@ async def homework_target_date(
             config.schedule.lesson_duration_minutes,
             time_overrides,
             lesson_numbers=lesson_numbers,
+            configured_start_times=configured_lesson_start_times(config.schedule),
         )
         end_by_slot = {
             number: time.fromisoformat(clock.end)

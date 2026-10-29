@@ -1,4 +1,5 @@
 import html
+import logging
 
 from aiogram import F, Router
 from aiogram.enums import ParseMode
@@ -7,8 +8,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.ai.gateway import AIGateway
 from bot.keyboards.inline import InlineKeyboardBuilder
-from bot.ai.personalization import personalized_greeting
+from bot.ai.personalization import greeting_fallback, personalized_greeting
 
 from bot.handlers.admin import (
     admin_broadcast_start_handler,
@@ -48,6 +50,7 @@ from database.models import User
 
 
 router = Router(name="base")
+logger = logging.getLogger(__name__)
 
 
 ROLE_NAMES = {
@@ -121,34 +124,23 @@ def _help_keyboard(config: AppConfig) -> InlineKeyboardMarkup:
 async def show_main_menu(
     message: Message,
     role: str,
-    user: User | None = None,
-    display_name: str | None = None,
-    personalization: str = "",
+    greeting: str,
 ) -> None:
-    full_name = user.full_name if user and user.full_name else display_name or "студент"
-    subgroup_names = {"english": "Английская", "french": "Французская"}
-    subgroup = subgroup_names.get(user.subgroup if user else None, "не указана")
-    subgroup_emoji = (
-        "english" if user and user.subgroup == "english"
-        else "french" if user and user.subgroup == "french"
-        else "users"
-    )
     await message.answer(
-        f"{get_emoji('greeting')} Привет, <b>" + html.escape(full_name) + "</b>!\n"
-        "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
-        f"Твоя подгруппа: <i>{get_emoji(subgroup_emoji)} "
-        f"{html.escape(subgroup)}</i>.\n\n"
-        f"Выбери нужное действие в меню ниже {get_emoji('down')}"
-        + (f"\n\n{html.escape(personalization)}" if personalization else "")
-        + (
-            f"\n\n{get_emoji('admin')} Доступна админ-панель."
-            if role in ADMIN_ROLES
-            else ""
-        ),
+        f"{get_emoji('greeting')} {html.escape(greeting)}",
         reply_markup=main_menu_keyboard(role),
         parse_mode=ParseMode.HTML,
     )
-    await message.answer("Меню разделов доступно на клавиатуре ниже.", reply_markup=main_reply_keyboard(role))
+    await message.answer("Меню", reply_markup=main_reply_keyboard(role))
+
+
+async def _greeting_name(session: AsyncSession, user_id: int, fallback: str) -> str:
+    try:
+        user = await session.get(User, user_id)
+    except Exception as exc:
+        logger.warning("Could not load stored greeting name (%s)", type(exc).__name__)
+        return fallback
+    return user.full_name if user and user.full_name else fallback
 
 
 @router.message(CommandStart())
@@ -158,26 +150,31 @@ async def start_handler(
     role: str,
     session: AsyncSession,
     config: AppConfig,
+    ai_gateway: AIGateway | None = None,
 ) -> None:
     await state.clear()
-    user = await session.get(User, message.from_user.id) if message.from_user else None
-    personalization = (
+    display_name = (
+        await _greeting_name(
+            session,
+            message.from_user.id,
+            message.from_user.full_name,
+        )
+        if message.from_user
+        else None
+    )
+    greeting = (
         await personalized_greeting(
             session,
             message.from_user.id,
             config.ai,
             config.bot.timezone,
+            display_name=display_name,
+            ai_gateway=ai_gateway,
         )
         if message.chat.type == "private" and message.from_user is not None
-        else ""
+        else greeting_fallback(display_name)
     )
-    await show_main_menu(
-        message,
-        role,
-        user,
-        message.from_user.full_name if message.from_user else None,
-        personalization,
-    )
+    await show_main_menu(message, role, greeting)
 
 
 @router.message(Command("admin"))
@@ -298,6 +295,7 @@ async def menu_callback_handler(
     role: str,
     config: AppConfig,
     session: AsyncSession,
+    ai_gateway: AIGateway | None = None,
 ) -> None:
     if callback.message is None:
         await callback.answer("Не вижу сообщение с меню. Открой /start.", show_alert=True)
@@ -307,32 +305,25 @@ async def menu_callback_handler(
     if action == "home":
         await state.clear()
         await callback.answer()
-        user = await session.get(User, callback.from_user.id)
-        full_name = user.full_name if user and user.full_name else callback.from_user.full_name
-        subgroup_names = {"english": "Английская", "french": "Французская"}
-        subgroup = subgroup_names.get(user.subgroup if user else None, "не указана")
-        subgroup_emoji = (
-            "english" if user and user.subgroup == "english"
-            else "french" if user and user.subgroup == "french"
-            else "users"
+        display_name = await _greeting_name(
+            session,
+            callback.from_user.id,
+            callback.from_user.full_name,
         )
-        personalization = (
+        greeting = (
             await personalized_greeting(
                 session,
                 callback.from_user.id,
                 config.ai,
                 config.bot.timezone,
+                display_name=display_name,
+                ai_gateway=ai_gateway,
             )
             if callback.message.chat.type == "private"
-            else ""
+            else greeting_fallback(display_name)
         )
         await callback.message.edit_text(
-            f"{get_emoji('greeting')} Привет, <b>" + html.escape(full_name) + "</b>!\n"
-            "Добро пожаловать в цифровой хаб группы <b>RC-215</b>.\n"
-            f"Твоя подгруппа: <i>{get_emoji(subgroup_emoji)} "
-            f"{html.escape(subgroup)}</i>.\n\n"
-            f"Выбери нужное действие в меню ниже {get_emoji('down')}"
-            + (f"\n\n{html.escape(personalization)}" if personalization else ""),
+            f"{get_emoji('greeting')} {html.escape(greeting)}",
             reply_markup=main_menu_keyboard(role),
             parse_mode=ParseMode.HTML,
         )

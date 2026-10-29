@@ -24,13 +24,9 @@ def _lesson_start_time(value: str) -> time:
         raise ValueError(f"Invalid lesson start time: {value}") from exc
 
 
-def lesson_numbers_for_day(
-    lessons: Iterable[Lesson],
-    schedule_config: ScheduleConfig,
-) -> list[int]:
-    """Map listed lessons to their numbered timetable slots by configured start time."""
-    lesson_rows = list(lessons)
-    all_start_times = sorted(
+def configured_lesson_start_times(schedule_config: ScheduleConfig) -> list[str]:
+    """Return all configured timetable slots in chronological order."""
+    starts = sorted(
         {
             _lesson_start_time(lesson.time)
             for weekday in WEEKDAYS
@@ -38,6 +34,19 @@ def lesson_numbers_for_day(
             for lesson in schedule_config.lessons_for(weekday, parity)
         }
     )
+    return [start.isoformat() for start in starts]
+
+
+def lesson_numbers_for_day(
+    lessons: Iterable[Lesson],
+    schedule_config: ScheduleConfig,
+) -> list[int]:
+    """Map listed lessons to their numbered timetable slots by configured start time."""
+    lesson_rows = list(lessons)
+    all_start_times = [
+        _lesson_start_time(value)
+        for value in configured_lesson_start_times(schedule_config)
+    ]
     slot_by_time = {
         start_time: index
         for index, start_time in enumerate(all_start_times, start=1)

@@ -4,3 +4,4 @@ aiosqlite>=0.19
 PyYAML>=6.0
 python-dotenv>=1.0
 google-genai>=1.0,<2.0
+httpx>=0.28.1,<1.0

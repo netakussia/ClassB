@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
@@ -17,6 +19,7 @@ from bot.keyboards.inline import InlineKeyboardBuilder
 from config_loader import AppConfig
 from database.models import AIUserSettings
 
+logger = logging.getLogger(__name__)
 router = Router(name="ai")
 
 
@@ -116,6 +119,7 @@ async def ai_settings_callback_handler(
         await callback.answer("Персональные AI-настройки сброшены. Лимиты запросов сохранены.")
     elif callback_data.action == "style":
         settings.humor_style = "gentle" if settings.humor_style == "memey" else "memey"
+        clear_user_cache(callback.from_user.id)
         await session.commit()
         await callback.answer("Стиль общения обновлён.")
     else:
@@ -130,7 +134,7 @@ async def ai_settings_callback_handler(
             await callback.answer("Неизвестная настройка.", show_alert=True)
             return
         setattr(settings, field, not getattr(settings, field))
-        if field in {"humor_enabled", "personalization_enabled"}:
+        if field in {"gemini_enabled", "humor_enabled", "personalization_enabled"}:
             clear_user_cache(callback.from_user.id)
         await session.commit()
         await callback.answer("Настройка сохранена.")
@@ -196,7 +200,7 @@ async def private_text_handler(
         humor_style=settings.humor_style,
     )
     if result is None:
-        await message.answer("Сейчас AI недоступен или достигнут лимит. Обычные разделы бота работают.")
+        await message.answer("Сейчас не удалось получить ответ от AI. Обычные разделы бота работают.")
         return
     if result.intent == "bot_question":
         await message.answer(
@@ -204,7 +208,11 @@ async def private_text_handler(
             "Открой /help, чтобы посмотреть разделы."
         )
     elif result.intent.startswith("navigation_"):
-        # Only the local explicit-navigation rules above may open a section.
-        await message.answer("Чтобы открыть раздел, назови его явно. Список разделов — /help.")
+        logger.info(
+            "Ignored model navigation intent without an explicit local navigation request "
+            "intent=%s",
+            result.intent,
+        )
+        await message.answer("Не до конца понял вопрос. Попробуй сформулировать иначе.")
     elif result.intent in {"ordinary_reply", "joke_or_banter"} and result.response:
         await message.answer(result.response)

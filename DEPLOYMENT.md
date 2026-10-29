@@ -6,6 +6,10 @@ exact approved SSH destination (one `user@host` or `host` per line) in the
 ignored local file `.deploy-allowlist` and pass the same value explicitly as
 `DEPLOY_REMOTE`. The script rejects malformed and non-allowlisted destinations.
 It relies on normal SSH host-key verification; do not disable it.
+If the running container was created with one additional Compose override,
+pass its verified absolute path with `DEPLOY_COMPOSE_OVERRIDE`; the script
+requires it to match the running container's Compose labels and uses the same
+file set for preflight and restart.
 
 The package is a source-only overlay: `bot/`, `database/`, `main.py`,
 `config_loader.py`, and `requirements.txt`. It does not contain or replace
@@ -29,8 +33,12 @@ It refuses to reuse an existing backup directory. `predeploy-files.tar.gz`
 contains the existing `config/`, `data/`, `logs/`, `.env`, Compose/Docker build
 files, documentation, tests, and source files that could be overlaid. This
 preserves active YAML files and the full data volume. The archive is listed
-successfully before continuing. `sqlite-bot.db` is a separate SQLite online
-backup made with the SQLite backup API; both source and backup must pass
+and extracted into an isolated restore-check directory before continuing.
+`predeploy-source.tar.gz` contains only the code paths needed for a source-only
+rollback. If an active external Compose override is used, it is saved separately
+as `predeploy-compose-override.tar.gz` and also tested by extraction.
+`sqlite-bot.db` is a separate SQLite online backup made with the SQLite backup
+API; source, backup, and an isolated restore rehearsal must all pass
 `PRAGMA integrity_check`, or the deployment stops before upload. Backup files
 are created with restrictive permissions. They remain on that server; arrange
 an owner-approved off-host backup separately if required.
