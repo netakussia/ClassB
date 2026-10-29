@@ -50,10 +50,10 @@ class AIConfig:
     model: str = "gemini-3.5-flash-lite"
     api_key: str | None = None
     user_daily_limit: int = 25
-    user_per_minute_limit: int = 3
-    global_daily_limit: int = 100
-    global_per_minute_limit: int = 10
-    global_tokens_per_minute: int = 10000
+    user_per_minute_limit: int = 6
+    global_daily_limit: int = 500
+    global_per_minute_limit: int = 15
+    global_tokens_per_minute: int = 250000
     prompt_token_reserve: int = 512
     max_input_chars: int = 500
     joke_max_output_tokens: int = 120
@@ -298,10 +298,10 @@ def _ai_config(directory: Path) -> AIConfig:
         "reactions_enabled": False,
         "model": "gemini-3.5-flash-lite",
         "user_daily_limit": 25,
-        "user_per_minute_limit": 3,
-        "global_daily_limit": 100,
-        "global_per_minute_limit": 10,
-        "global_tokens_per_minute": 10000,
+        "user_per_minute_limit": 6,
+        "global_daily_limit": 500,
+        "global_per_minute_limit": 15,
+        "global_tokens_per_minute": 250000,
         "prompt_token_reserve": 512,
         "max_input_chars": 500,
         "joke_max_output_tokens": 120,
@@ -331,8 +331,10 @@ def _ai_config(directory: Path) -> AIConfig:
             raise ValueError(f"{key} in {path} must be a positive integer")
     if type(values["retries"]) is not int or values["retries"] not in {0, 1}:
         raise ValueError(f"retries in {path} must be 0 or 1")
-    if values["user_daily_limit"] > 25 or values["user_per_minute_limit"] > 3:
-        raise ValueError("AI user quotas cannot exceed 25 requests/day and 3 requests/minute")
+    if values["user_daily_limit"] > 25 or values["user_per_minute_limit"] > 6:
+        raise ValueError(
+            "AI user quotas cannot exceed 25 requests/day and 6 requests/minute"
+        )
     if values["max_input_chars"] > 500 or values["joke_max_output_tokens"] > 120:
         raise ValueError("AI input/output limits cannot exceed 500 characters/120 tokens")
     if values["retries"] > 1:

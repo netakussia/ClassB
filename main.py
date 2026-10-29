@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
@@ -114,15 +115,31 @@ async def _daily_event_reminders(
 
 
 async def main() -> None:
+    startup_started = monotonic()
+    previous_stage_started = startup_started
     bot: Bot | None = None
     gemini_client: GeminiClient | None = None
     cleanup_task: asyncio.Task[None] | None = None
     event_reminder_task: asyncio.Task[None] | None = None
 
+    def log_startup_stage(stage: str) -> None:
+        nonlocal previous_stage_started
+        now = monotonic()
+        logger.info(
+            "Startup timing stage=%s elapsed_ms=%d stage_ms=%d",
+            stage,
+            int((now - startup_started) * 1000),
+            int((now - previous_stage_started) * 1000),
+        )
+        previous_stage_started = now
+
     try:
         configure_logging()
+        log_startup_stage("application_entered")
         config = load_config()
+        log_startup_stage("configuration_loaded")
         await init_db()
+        log_startup_stage("database_initialized")
         session_factory = async_sessionmaker(
             bind=async_engine,
             expire_on_commit=False,
@@ -152,6 +169,7 @@ async def main() -> None:
             config.ai,
             config.bot.timezone,
         )
+        log_startup_stage("core_services_initialized")
         async with session_factory() as session:
             await mark_past_absences_completed(session, config)
         try:
@@ -164,6 +182,7 @@ async def main() -> None:
                 )
         except Exception:
             logger.exception("Стартовая очистка устаревших данных завершилась ошибкой")
+        log_startup_stage("startup_maintenance_completed")
         cleanup_task = asyncio.create_task(
             _daily_cleanup(session_factory, config)
         )
@@ -198,6 +217,8 @@ async def main() -> None:
         dispatcher.include_router(admin_router)
         dispatcher.include_router(absent_router)
         dispatcher.include_router(ai_router)
+        log_startup_stage("dispatcher_configured")
+        log_startup_stage("polling_starting")
         await dispatcher.start_polling(bot, close_bot_session=False)
     finally:
         background_tasks = [

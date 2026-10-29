@@ -21,7 +21,10 @@ class AIConfigTests(unittest.TestCase):
         self.assertFalse(config.reactions_enabled)
         self.assertEqual(config.model, "gemini-3.5-flash-lite")
         self.assertEqual(config.user_daily_limit, 25)
-        self.assertEqual(config.user_per_minute_limit, 3)
+        self.assertEqual(config.user_per_minute_limit, 6)
+        self.assertEqual(config.global_daily_limit, 500)
+        self.assertEqual(config.global_per_minute_limit, 15)
+        self.assertEqual(config.global_tokens_per_minute, 250000)
         self.assertEqual(config.max_input_chars, 500)
         self.assertEqual(config.retries, 1)
         self.assertIsNone(config.api_key)
@@ -45,8 +48,8 @@ class AIConfigTests(unittest.TestCase):
     def test_user_quotas_cannot_exceed_approved_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "ai.yaml"
-            config_file.write_text("user_per_minute_limit: 4\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "3 requests/minute"):
+            config_file.write_text("user_per_minute_limit: 7\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "6 requests/minute"):
                 _ai_config(Path(directory))
 
     def test_retries_are_limited_to_one(self) -> None:

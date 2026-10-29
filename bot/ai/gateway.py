@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 import re
 from datetime import datetime, time, timedelta, timezone
 from time import monotonic
@@ -16,7 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config_loader import AIConfig
 from database.models import AIQuotaCounter, AIRecentResponse
-from bot.ai.gemini_client import GeminiTemporaryError, TextGenerator
+from bot.ai.gemini_client import (
+    GeminiRateLimitError,
+    GeminiTemporaryError,
+    TextGenerator,
+)
 from bot.ai.policy import (
     AIResult,
     is_explicit_banter_request,
@@ -29,10 +34,26 @@ logger = logging.getLogger(__name__)
 PROJECT_QUOTA_TIMEZONE = ZoneInfo("America/Los_Angeles")
 USER_QUOTA_RETRIES = 4
 MAX_TOTAL_REQUEST_SECONDS = 30
+RETRY_BACKOFF_BASE_SECONDS = 0.25
+RETRY_BACKOFF_MAX_SECONDS = 2.0
 
 
 class QuotaUnavailable(Exception):
     """Raised when an atomic reservation cannot be completed safely."""
+
+
+def _retry_delay_seconds(
+    attempt: int,
+    retry_after_seconds: float | None = None,
+) -> float:
+    exponential_cap = min(
+        RETRY_BACKOFF_BASE_SECONDS * (2**attempt),
+        RETRY_BACKOFF_MAX_SECONDS,
+    )
+    jittered = random.uniform(exponential_cap * 0.5, exponential_cap * 1.5)
+    if retry_after_seconds is not None:
+        return max(jittered, retry_after_seconds)
+    return jittered
 
 
 def _utc_naive(value: datetime) -> datetime:
@@ -248,10 +269,40 @@ class AIGateway:
                                     max_output_tokens=self._config.joke_max_output_tokens,
                                     humor_style=(
                                         humor_style
-                                        if humor_style in {"memey", "gentle"}
-                                        else "memey"
+                                        if allow_humor
+                                        and humor_style in {"memey", "gentle"}
+                                        else "neutral"
                                     ),
                                 )
+                        except GeminiRateLimitError as exc:
+                            retryable = exc.category == "rate_limit"
+                            logger.warning(
+                                "Gemini provider limit handled category=%s "
+                                "retrying=%s attempt=%d/%d",
+                                exc.category,
+                                retryable and attempt < self._config.retries,
+                                attempt + 1,
+                                max_attempts,
+                            )
+                            if not retryable or attempt >= self._config.retries:
+                                return None
+                            delay = _retry_delay_seconds(
+                                attempt,
+                                exc.retry_after_seconds,
+                            )
+                            remaining = total_deadline_seconds - (
+                                monotonic() - total_started
+                            )
+                            if delay >= remaining:
+                                logger.warning(
+                                    "Gemini retry skipped reason=deadline "
+                                    "attempt=%d/%d",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                return None
+                            await asyncio.sleep(delay)
+                            continue
                         except (GeminiTemporaryError, asyncio.TimeoutError) as exc:
                             logger.warning(
                                 "Gemini temporary failure attempt=%d/%d retrying=%s "
@@ -263,6 +314,24 @@ class AIGateway:
                                 int((monotonic() - request_started) * 1000),
                             )
                             if attempt < self._config.retries:
+                                retry_after = (
+                                    exc.retry_after_seconds
+                                    if isinstance(exc, GeminiTemporaryError)
+                                    else None
+                                )
+                                delay = _retry_delay_seconds(attempt, retry_after)
+                                remaining = total_deadline_seconds - (
+                                    monotonic() - total_started
+                                )
+                                if delay >= remaining:
+                                    logger.warning(
+                                        "Gemini retry skipped reason=deadline "
+                                        "attempt=%d/%d",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    return None
+                                await asyncio.sleep(delay)
                                 continue
                             return None
                         except Exception as exc:

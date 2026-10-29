@@ -7,11 +7,11 @@ reactions_enabled: false
 model: "gemini-3.5-flash-lite"
 
 user_daily_limit: 25
-user_per_minute_limit: 3
-# Set project limits no higher than the current Google AI Studio project/model quota.
-global_daily_limit: 100
-global_per_minute_limit: 10
-global_tokens_per_minute: 10000
+user_per_minute_limit: 6
+# Application-side ceilings, not provider quotas; keep them below verified project limits.
+global_daily_limit: 500
+global_per_minute_limit: 15
+global_tokens_per_minute: 250000
 # Extra allowance for the fixed system prompt and tokenizer variance; input/output are added.
 prompt_token_reserve: 512
 max_input_chars: 500
