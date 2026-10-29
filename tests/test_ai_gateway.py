@@ -174,6 +174,79 @@ class AIGatewayTests(unittest.TestCase):
 
         self._run(test)
 
+    def test_owner_bypasses_personal_limits_but_not_project_limits(self) -> None:
+        async def test() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{Path(directory) / 'owner-quota.db'}",
+                    connect_args={"timeout": 10},
+                )
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+                config = AIConfig(
+                    enabled=True,
+                    project_limits_verified=True,
+                    user_daily_limit=1,
+                    user_per_minute_limit=1,
+                    global_daily_limit=2,
+                )
+                owner_id = 900
+                self.assertTrue(
+                    await reserve_quota(
+                        factory,
+                        owner_id,
+                        config,
+                        "Europe/Chisinau",
+                    )
+                )
+                generator = FakeGenerator()
+                gateway = AIGateway(
+                    generator,
+                    factory,
+                    config,
+                    "Europe/Chisinau",
+                    owner_ids={owner_id},
+                )
+
+                owner_result = await gateway.generate(
+                    owner_id,
+                    "first owner request",
+                    allow_humor=False,
+                )
+                blocked_result = await gateway.generate(
+                    owner_id,
+                    "second owner request",
+                    allow_humor=False,
+                )
+
+                self.assertEqual(owner_result.response, "Понял.")
+                self.assertIsNone(blocked_result)
+                self.assertEqual(
+                    generator.calls,
+                    ["first owner request"],
+                )
+                async with factory() as session:
+                    user_daily_count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "user",
+                            AIQuotaCounter.scope_id == str(owner_id),
+                            AIQuotaCounter.window == "day",
+                        )
+                    )
+                    project_daily_count = await session.scalar(
+                        select(func.sum(AIQuotaCounter.count)).where(
+                            AIQuotaCounter.scope == "global",
+                            AIQuotaCounter.window == "day",
+                        )
+                    )
+                self.assertEqual(user_daily_count, 1)
+                self.assertEqual(project_daily_count, 2)
+                await engine.dispose()
+
+        self._run(test)
+
     def test_project_token_minute_limit_is_reserved_atomically(self) -> None:
         async def test() -> None:
             with tempfile.TemporaryDirectory() as directory:

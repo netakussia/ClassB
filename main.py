@@ -168,6 +168,7 @@ async def main() -> None:
             session_factory,
             config.ai,
             config.bot.timezone,
+            owner_ids=config.roles.owner,
         )
         log_startup_stage("core_services_initialized")
         async with session_factory() as session:

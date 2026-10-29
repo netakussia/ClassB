@@ -78,6 +78,7 @@ async def reserve_quota(
     config: AIConfig,
     user_timezone: str,
     *,
+    bypass_user_limits: bool = False,
     estimated_tokens: int = 1,
     now: datetime | None = None,
 ) -> bool:
@@ -94,16 +95,19 @@ async def reserve_quota(
     if estimated_tokens > config.global_tokens_per_minute:
         logger.info("AI quota rejected scope=project window=token_minute")
         return False
-    buckets = (
-        ("user", str(user_id), "day", user_day, config.user_daily_limit, 1),
-        ("user", str(user_id), "minute", minute_start, config.user_per_minute_limit, 1),
+    buckets = [
         ("global", "project", "day", project_day, config.global_daily_limit, 1),
         ("global", "project", "minute", minute_start, config.global_per_minute_limit, 1),
         (
             "global", "project", "token_minute", minute_start,
             config.global_tokens_per_minute, estimated_tokens,
         ),
-    )
+    ]
+    if not bypass_user_limits:
+        buckets[0:0] = [
+            ("user", str(user_id), "day", user_day, config.user_daily_limit, 1),
+            ("user", str(user_id), "minute", minute_start, config.user_per_minute_limit, 1),
+        ]
 
     for attempt in range(USER_QUOTA_RETRIES):
         try:
@@ -207,11 +211,13 @@ class AIGateway:
         session_factory: async_sessionmaker[AsyncSession],
         config: AIConfig,
         user_timezone: str,
+        owner_ids: set[int] | tuple[int, ...] | list[int] = (),
     ) -> None:
         self._client = client
         self._session_factory = session_factory
         self._config = config
         self._user_timezone = user_timezone
+        self._owner_ids = frozenset(owner_ids)
         self._semaphore = asyncio.Semaphore(4)
 
     async def generate(
@@ -255,6 +261,7 @@ class AIGateway:
                                 user_id,
                                 self._config,
                                 self._user_timezone,
+                                bypass_user_limits=user_id in self._owner_ids,
                                 estimated_tokens=estimated_tokens,
                             )
                         except QuotaUnavailable:
